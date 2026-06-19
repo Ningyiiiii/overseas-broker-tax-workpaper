@@ -1,0 +1,4 @@
+interface:
+  display_name: "Overseas Broker Tax Workpaper"
+  short_description: "Generate overseas broker tax workpapers."
+  default_prompt: "Use $overseas-broker-tax-workpaper to scan this folder and generate the eight overseas broker tax workpaper files."

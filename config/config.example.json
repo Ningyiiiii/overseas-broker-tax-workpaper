@@ -1,0 +1,15 @@
+{
+  "source_root": ".",
+  "output_dir": "outputs",
+  "years": [2021, 2022, 2023, 2024, 2025],
+  "markets": ["HK", "US"],
+  "period_regimes": ["china_calendar_year", "hong_kong_fiscal_year"],
+  "cost_methods": ["fifo", "period_weighted_average"],
+  "broker_parsers": ["futu"],
+  "password_file": "config/passwords.json",
+  "fx": {
+    "source": "pboc_central_parity",
+    "target_currency": "HKD",
+    "fallback": "previous_available_official_rate"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "brokers": {
+    "futu": {
+      "enabled": true,
+      "extensions": [".pdf", ".xlsx", ".xls", ".csv"],
+      "default_pdf_password_candidates": [],
+      "template_files_are_not_source": ["富途总结表.xlsx"]
+    }
+  }
+}

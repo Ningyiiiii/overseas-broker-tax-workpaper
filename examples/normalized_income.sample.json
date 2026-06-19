@@ -1,0 +1,18 @@
+[
+  {
+    "broker": "futu",
+    "market": "HK",
+    "currency": "HKD",
+    "date": "2024-06-14",
+    "code": "00363",
+    "name": "上海实业控股",
+    "category": "股息/分派",
+    "amount": 3120.0,
+    "tax_withheld": null,
+    "fee": null,
+    "source_file": "example.pdf",
+    "source_page": 1,
+    "source_row": null,
+    "raw_text": "F/D-HKD example redacted"
+  }
+]

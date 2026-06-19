@@ -1,0 +1,22 @@
+[
+  {
+    "broker": "futu",
+    "market": "HK",
+    "currency": "HKD",
+    "code": "00700",
+    "name": "腾讯控股",
+    "side": "BUY",
+    "trade_date": "2024-01-02",
+    "settle_date": "2024-01-04",
+    "order_id": "example-order",
+    "trade_id": "example-trade",
+    "quantity": 100,
+    "price": 300.0,
+    "gross_amount": 30000.0,
+    "fee_total": 50.0,
+    "source_file": "example.pdf",
+    "source_page": 1,
+    "source_row": null,
+    "raw_text": "redacted example"
+  }
+]

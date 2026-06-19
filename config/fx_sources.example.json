@@ -1,0 +1,7 @@
+{
+  "pboc_central_parity": {
+    "description": "Use official PBOC central parity rates for period-end conversion.",
+    "pairs": ["USDHKD"],
+    "fallback": "Use the previous available official quote when the period end date has no quote."
+  }
+}

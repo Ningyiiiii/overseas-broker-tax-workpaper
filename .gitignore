@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+config/config.json
+config/passwords.json
+outputs/
+run_report.json
+运行报告.md
+*.xlsx
+*.xls
+*.csv
+*.pdf
+!examples/*.sample.json
+!examples/*.sample.md

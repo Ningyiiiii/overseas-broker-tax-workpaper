@@ -1,0 +1,7 @@
+{
+  "source_root": ".",
+  "output_dir": "outputs",
+  "markets": ["HK", "US"],
+  "period_regimes": ["china_calendar_year", "hong_kong_fiscal_year"],
+  "cost_methods": ["fifo", "period_weighted_average"]
+}
