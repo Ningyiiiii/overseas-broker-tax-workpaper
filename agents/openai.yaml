@@ -1,4 +1,4 @@
 interface:
   display_name: "Overseas Broker Tax Workpaper"
-  short_description: "Generate overseas broker tax workpapers."
-  default_prompt: "Use $overseas-broker-tax-workpaper to scan this folder and generate the eight overseas broker tax workpaper files."
+  short_description: "Parse overseas broker statements and generate HK/US tax workpapers."
+  default_prompt: "Use $overseas-broker-tax-workpaper to scan this folder, validate normalized HK/US brokerage records, and generate the eight overseas broker tax workpaper files."
