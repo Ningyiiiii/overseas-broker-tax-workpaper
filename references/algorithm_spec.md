@@ -35,6 +35,14 @@ pnl = sell_allocated_amount - buy_allocated_amount - buy_allocated_fee - sell_al
 
 If there are not enough buy lots for a sell, leave cost and P&L blank for the missing segment and record an exception. Never force missing cost to zero.
 
+Before recording a missing-cost exception, run a cost-source trace for that `market + currency + code`:
+
+- Search earlier normalized buy trades.
+- Search stock movement records such as IPO allotments and inbound stock transfers.
+- Search earlier statements' opening and closing holding snapshots to establish continuity, then continue tracing backward to the true acquisition source.
+- Treat holding snapshots as reconciliation evidence, not as cost by themselves. Use holding market value as substitute cost only if the user explicitly approves that fallback.
+- If the sell date is outside all requested output periods, do not add it to period rows or missing-cost exception sheets.
+
 ## Period Weighted-Average Cost
 
 Calculate by `market + currency + code + period`.
@@ -53,7 +61,7 @@ pnl =
   sell_gross_amount - weighted_average_unit_cost * sell_quantity - sell_fee_total
 ```
 
-Opening cost comes from prior records or prior period carry-forward. If opening or period buy cost is missing, affected sells must remain blank and enter exceptions.
+Opening cost comes from prior records, stock movement cost sources, or prior period carry-forward. If a period starts with a holding that has no cost in the carry-forward pool, trace backward through earlier statements before declaring missing cost. If opening or period buy cost remains missing after that trace, affected sells must remain blank and enter exceptions.
 
 ## Dividends and Company Actions
 

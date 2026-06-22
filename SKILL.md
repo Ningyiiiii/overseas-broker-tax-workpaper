@@ -65,6 +65,20 @@ Read these files when implementing or modifying the workflow:
 
 ## Resource Usage
 
-Use `scripts/run_workpaper.py` as the primary command wrapper after the parser and output scripts are wired for the local data set. Use scripts in `scripts/parsers/`, `scripts/engines/`, `scripts/output/`, and `scripts/reports/` as implementation modules. Keep deterministic business rules in scripts and detailed rules in references.
+Install `requirements.txt` if the runtime environment does not already provide `openpyxl`, `pdfplumber`, and `pypdf`.
+
+Use `scripts/run_workpaper.py` as the primary command wrapper:
+
+```bash
+python scripts/run_workpaper.py --source-root <source-folder> --output-dir <output-folder> --password <pdf-password>
+```
+
+Use `--audit-only` before final calculations when parser coverage has changed:
+
+```bash
+python scripts/run_workpaper.py --source-root <source-folder> --output-dir <output-folder> --password <pdf-password> --audit-only
+```
+
+Use scripts in `scripts/parsers/`, `scripts/engines/`, `scripts/output/`, and `scripts/reports/` as implementation modules. The bundled `scripts/runtime/` contains the currently validated Futu end-to-end runtime used by the command wrapper; keep parser-specific rules there or in `scripts/parsers/` and keep shared algorithms in `scripts/engines/`.
 
 When adapting this skill to a new statement set, first produce and inspect normalized records before generating final workbooks. If a new broker is encountered, add a parser that satisfies `references/broker_parser_contract.md`; do not change the output workbook contract unless the user explicitly approves a new format.

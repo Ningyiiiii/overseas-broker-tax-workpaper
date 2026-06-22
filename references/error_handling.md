@@ -34,3 +34,9 @@ Record individual problems in workbook exception sheets:
 - Fee parsing failure.
 
 Do not silently drop problematic records.
+
+Missing-cost exception rows should only be emitted after parser-level and engine-level cost tracing has been attempted. For Futu data, check earlier trades, old-account and new-account IPO allotment / stock movement rows, and prior-month opening/closing holding continuity before declaring missing cost.
+
+Do not add records outside the requested output periods to workbook exception sheets. They may be retained in parse audit artifacts, but they should not inflate tax-period missing-cost exception counts.
+
+When a holding snapshot proves share continuity but does not provide original acquisition cost, classify the issue explicitly as unresolved historical cost basis rather than parser-missing trade data.

@@ -34,11 +34,11 @@ Use the final confirmed output style:
 - Summary rows are for reconciliation only and must not calculate P&L.
 - Detail rows calculate P&L.
 - Numeric columns are real Excel numbers, not text-formatted numbers.
-- The period total row includes sell total, transaction fees, P&L, and dividend total.
+- The period total row includes sell total, transaction fees, P&L, and a dedicated `股息/分派按年合计` column. Do not repeat this dividend total on each trade detail row.
 
 ## Dividend and Company-Action Sheet
 
-Detail rows do not repeat period totals. After all dividend/company-action rows for each period, add a total row. The total goes in a dedicated annual or fiscal-period total column.
+Detail rows do not repeat period totals. After all dividend/company-action rows for each period, add a total row named `年度股息/分派合计` or the fiscal-year equivalent. The total goes in a dedicated `股息/分派按年合计` column.
 
 Company-action fee rows such as `Scrip Charge` and `Handling Charge` should appear in this sheet when they relate to a dividend or scrip event.
 

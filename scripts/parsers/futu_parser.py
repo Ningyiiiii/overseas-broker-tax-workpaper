@@ -9,6 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
+from dataclasses import asdict
+
+import pdfplumber
+
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
+if str(RUNTIME_DIR) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_DIR))
+
+import futu_workpaper_runtime as runtime
 
 
 HK_EXCHANGES = {"SEHK"}
@@ -108,9 +118,74 @@ class FutuParser:
     def parse(self, path: Path, password_candidates: list[str]) -> dict:
         """Parse a Futu source file into normalized records.
 
-        This scaffold intentionally keeps the public command contract stable.
-        Implementations should wire the validated Futu extraction pipeline here
-        and use the helpers above for layout and market routing.
+        This uses the validated Futu runtime parser bundled with the skill. The
+        parser still keeps broker-specific layout handling here and emits plain
+        normalized dictionaries for the shared engines.
         """
 
-        raise NotImplementedError("Wire the validated Futu extraction pipeline into this parser.")
+        password = password_candidates[0] if password_candidates else ""
+        runtime.PASSWORD = password
+        rel = path.name
+        trades: list[object] = []
+        income: list[dict] = []
+        financing: list[dict] = []
+        exceptions: list[dict] = []
+        try:
+            if "1001231828219038" in path.name:
+                trades = runtime.parse_modern_trades(path, rel)
+                trades.extend(runtime.parse_modern_ipo_allotments(path, rel))
+                income, financing = runtime.parse_modern_cash(path, rel)
+            else:
+                with pdfplumber.open(path, password=password or None) as pdf:
+                    if "1001100520203011" in path.name or "美股" in str(path) or "US" in str(path).upper():
+                        trades, income, financing = runtime.parse_old_us(pdf, rel)
+                    else:
+                        trades, income, financing = runtime.parse_old_hk(pdf, rel)
+        except Exception as exc:
+            exceptions.append(
+                {
+                    "broker": self.broker,
+                    "source_file": str(path),
+                    "source_page": None,
+                    "record_type": "source_file",
+                    "severity": "error",
+                    "message": repr(exc),
+                    "raw_text": "",
+                }
+            )
+
+        trade_records = []
+        for trade in trades:
+            item = asdict(trade) if hasattr(trade, "__dataclass_fields__") else dict(trade)
+            trade_records.append(
+                {
+                    "broker": self.broker,
+                    "market": item.get("market", ""),
+                    "currency": item.get("currency", ""),
+                    "code": item.get("code", ""),
+                    "name": item.get("name", ""),
+                    "side": "BUY" if item.get("side") == "buy" else "SELL" if item.get("side") == "sell" else item.get("side", ""),
+                    "trade_date": str(item.get("trade_datetime", ""))[:10].replace("/", "-"),
+                    "quantity": float(runtime.d(item.get("quantity"))),
+                    "price": float(runtime.d(item.get("price"))),
+                    "gross_amount": float(runtime.d(item.get("amount"))),
+                    "fee_total": float(runtime.d(item.get("fee_total"))),
+                    "source_file": item.get("source_file", str(path)),
+                    "exchange": "",
+                    "settle_date": str(item.get("settle_date", "")).replace("/", "-") or None,
+                    "order_id": item.get("order_id"),
+                    "cash_change": float(runtime.d(item.get("change_amount"))),
+                    "fee_detail": item.get("fee_detail", {}),
+                    "source_page": item.get("page"),
+                    "raw_text": item.get("raw", ""),
+                    "parser_layout": item.get("format", ""),
+                    "exception": item.get("notes", ""),
+                }
+            )
+
+        return {
+            "trades": trade_records,
+            "income": income,
+            "financing_interest": financing,
+            "exceptions": exceptions,
+        }
