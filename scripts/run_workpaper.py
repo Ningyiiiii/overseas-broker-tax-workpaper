@@ -30,8 +30,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_password(args: argparse.Namespace) -> str:
+    pwds = load_passwords(args)
+    return pwds[0] if pwds else ""
+
+
+def load_passwords(args: argparse.Namespace) -> list[str]:
     if args.password:
-        return args.password
+        return [args.password]
     candidates: list[Path] = []
     config_path = Path(args.config)
     if config_path.exists():
@@ -39,6 +44,7 @@ def load_password(args: argparse.Namespace) -> str:
     source_root = Path(args.source_root).resolve()
     candidates.extend(
         [
+            Path.cwd() / "config" / "passwords.json",
             source_root / "config" / "passwords.json",
             SCRIPT_DIR.parent / "config" / "passwords.json",
         ]
@@ -58,17 +64,37 @@ def load_password(args: argparse.Namespace) -> str:
             raw_candidates = data.get("password_candidates")
             if isinstance(raw_candidates, list):
                 values.extend(str(item) for item in raw_candidates if item)
+            per_broker = data.get("per_broker")
+            if isinstance(per_broker, dict):
+                for broker_pwds in per_broker.values():
+                    if isinstance(broker_pwds, list):
+                        values.extend(str(item) for item in broker_pwds if item)
+                    elif broker_pwds:
+                        values.append(str(broker_pwds))
+            per_account = data.get("per_account")
+            if isinstance(per_account, dict):
+                values.extend(str(v) for v in per_account.values() if v)
+            per_file = data.get("per_file")
+            if isinstance(per_file, dict):
+                values.extend(str(v) for v in per_file.values() if v)
         if values:
-            return values[0]
-    return ""
+            # deduplicate while preserving order
+            seen: set[str] = set()
+            unique: list[str] = []
+            for v in values:
+                if v not in seen:
+                    seen.add(v)
+                    unique.append(v)
+            return unique
+    return []
 
 
 def main() -> int:
     args = parse_args()
     source_root = Path(args.source_root).resolve()
     output_dir = Path(args.output_dir).resolve()
-    password = load_password(args)
-    runtime.configure_runtime(source_root=source_root, output_dir=output_dir, password=password)
+    passwords = load_passwords(args)
+    runtime.configure_runtime(source_root=source_root, output_dir=output_dir, passwords=passwords)
     report = runtime.run_workpaper(audit_only=args.audit_only)
     print(f"output_root={report.get('output_root')}", flush=True)
     return 0

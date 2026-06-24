@@ -19,6 +19,7 @@ from pypdf import PdfReader
 
 ROOT = Path.cwd()
 PASSWORD = ""
+PASSWORDS: list[str] = []
 RUN_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUTPUT_ROOT = ROOT / "outputs" / f"tax_workpaper_new_rules_{RUN_STAMP}"
 WORK_DIR = OUTPUT_ROOT / "_work"
@@ -28,13 +29,18 @@ if str(RUNTIME_DIR) not in sys.path:
 import futu_tax_extract as futu
 
 
-def configure_runtime(source_root: Path | str, output_dir: Path | str | None = None, password: str | None = None) -> None:
+def configure_runtime(source_root: Path | str, output_dir: Path | str | None = None, password: str | None = None, passwords: list[str] | None = None) -> None:
     """Configure source/output paths before running the generated workpaper flow."""
 
-    global ROOT, PASSWORD, RUN_STAMP, OUTPUT_ROOT, WORK_DIR
+    global ROOT, PASSWORD, PASSWORDS, RUN_STAMP, OUTPUT_ROOT, WORK_DIR
     ROOT = Path(source_root).resolve()
     if password:
         PASSWORD = password
+        PASSWORDS = [password]
+    if passwords:
+        PASSWORDS = passwords
+        if not PASSWORD:
+            PASSWORD = passwords[0] if passwords else ""
     RUN_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_output = Path(output_dir).resolve() if output_dir else ROOT / "outputs"
     OUTPUT_ROOT = base_output / f"tax_workpaper_new_rules_{RUN_STAMP}"
@@ -307,7 +313,19 @@ def period_keys(regime: str) -> list[str]:
 def modern_pdf_lines(path: Path) -> list[tuple[int, list[str]]]:
     reader = PdfReader(str(path))
     if reader.is_encrypted:
-        reader.decrypt(PASSWORD)
+        candidates = []
+        if PASSWORD:
+            candidates.append(PASSWORD)
+        for pwd in PASSWORDS:
+            if pwd not in candidates:
+                candidates.append(pwd)
+        for pwd in candidates:
+            try:
+                result = reader.decrypt(pwd)
+                if result:  # 0 = NOT_DECRYPTED, 1 = USER_PASSWORD, 2 = OWNER_PASSWORD
+                    break
+            except Exception:
+                continue
     pages: list[tuple[int, list[str]]] = []
     for page_no, page in enumerate(reader.pages, start=1):
         lines = [clean(x) for x in (page.extract_text() or "").splitlines()]
@@ -758,7 +776,7 @@ def parse_global_old_ipo_allotments(files: list[Path]) -> list[Any]:
         if "1001231828219038" in path.name:
             continue
         try:
-            with pdfplumber.open(path, password=PASSWORD) as pdf:
+            with open_pdf_with_passwords(path) as pdf:
                 for page_no, page in enumerate(pdf.pages, start=1):
                     for table in page.extract_tables() or []:
                         for row in table:
@@ -858,7 +876,7 @@ def classify_cash(desc: str, item_type: str) -> str:
         return ""
     if "INTEREST FOR MONTH" in u or re.search(r"\bMARGIN\b|\bFINANC", u):
         return "融资利息"
-    if "SCRIP CHARGE" in u or "HANDLING CHARGE" in u or "ADR FEE" in u:
+    if "SCRIP CHARGE" in u or "HANDLING CHARGE" in u or "ADR FEE" in u or "WITHOLDING TAX" in u or "WITHHOLDING TAX" in u:
         return "股息/分派相关费用"
     if "F/D-" in u or "I/D-" in u or "DIVIDEND" in u or "DISTRIBUTION" in u:
         return "股息/分派"
@@ -969,6 +987,10 @@ def parse_old_hk(pdf: pdfplumber.PDF, rel: str) -> tuple[list[Any], list[dict[st
     except Exception:
         pass
     try:
+        trades.extend(futu.extract_scrip_dividend_trades(pdf, rel))
+    except Exception:
+        pass
+    try:
         income, financing = futu.extract_cash_items_v2(pdf, rel)
     except Exception:
         income, financing = [], []
@@ -977,20 +999,51 @@ def parse_old_hk(pdf: pdfplumber.PDF, rel: str) -> tuple[list[Any], list[dict[st
         trade.currency = trade.currency or "HKD"
         trade.name = safe_name(trade.name)
     for item in income:
-        item["market"] = "HK"
+        item["market"] = "US" if item.get("currency") == "USD" else "HK"
         item["date"] = clean(item.get("date", "")).replace("/", "-")
         item["category"] = classify_cash(item.get("description", ""), item.get("category", "")) or "股息/分派"
         item["amount"] = money(d(item.get("amount", "0")))
         item.setdefault("code", extract_desc_code(item.get("description", "")))
         item.setdefault("name", "")
     for item in financing:
-        item["market"] = "HK"
+        item["market"] = "US" if item.get("currency") == "USD" else "HK"
         item["date"] = clean(item.get("date", "")).replace("/", "-")
         item["category"] = "融资利息"
         item["amount"] = money(d(item.get("amount", "0")))
         item.setdefault("code", "")
         item.setdefault("name", "")
     return trades, dedupe_items(income), dedupe_items(financing)
+
+
+def open_pdf_with_passwords(path: Path):
+    """Try opening a PDF with PASSWORD and all PASSWORDS candidates.
+    Validates the password by attempting to extract text from the first page,
+    because pdfplumber.open does not validate the password eagerly."""
+    candidates = []
+    if PASSWORD:
+        candidates.append(PASSWORD)
+    for pwd in PASSWORDS:
+        if pwd not in candidates:
+            candidates.append(pwd)
+    candidates.append("")  # try without password as last resort
+    last_exc = None
+    for pwd in candidates:
+        pdf = None
+        try:
+            pdf = pdfplumber.open(path, password=pwd)
+            # Validate by trying to access the first page text
+            if pdf.pages:
+                _ = pdf.pages[0].extract_text()
+            return pdf
+        except Exception as exc:
+            last_exc = exc
+            if pdf is not None:
+                try:
+                    pdf.close()
+                except Exception:
+                    pass
+            continue
+    raise last_exc
 
 
 def parse_sources() -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1010,7 +1063,7 @@ def parse_sources() -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any
                 t.extend(parse_modern_ipo_allotments(path, rel))
                 inc, fin = parse_modern_cash(path, rel)
             else:
-                with pdfplumber.open(path, password=PASSWORD) as pdf:
+                with open_pdf_with_passwords(path) as pdf:
                     if "美股" in rel:
                         t, inc, fin = parse_old_us(pdf, rel)
                     else:
@@ -1034,6 +1087,19 @@ def parse_sources() -> tuple[list[Any], list[dict[str, Any]], list[dict[str, Any
                 "error": "",
             }
         )
+    # Deduplicate IPO trades: keep newer format="ipo" over "global_old_ipo_allotment"
+    # when same (code, trade_datetime, quantity, side) appears in both formats.
+    seen_ipo: set[tuple[str, str, str, str]] = set()
+    deduped: list[Any] = []
+    for t in trades:
+        key = (t.code, t.trade_datetime, t.quantity, t.side)
+        if t.format == "global_old_ipo_allotment":
+            if key in seen_ipo:
+                continue  # skip duplicate old-format record
+        else:
+            seen_ipo.add(key)
+        deduped.append(t)
+    trades = deduped
     return trades, income, financing, summaries, errors
 
 

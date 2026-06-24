@@ -28,7 +28,7 @@ FEE_RE = re.compile(
 )
 SUBTOTAL_RE = re.compile(r"\u5c0f\u8a08[:\uff1a]\s*([-+]?\d[\d,]*\.\d{2})")
 EXEC_RE = re.compile(
-    r"\b(?P<market>SEHK|FUTU OTC|NYSE|NASDAQ|AMEX|US)\s+"
+    r"\b(?P<market>[A-Z]{2,})\s+"
     r"(?P<currency>[A-Z]{3})\s+"
     r"(?P<trade_date>\d{4}/\d{2}/\d{2})\s+"
     r"(?P<settle_date>\d{4}/\d{2}/\d{2})\s+"
@@ -107,13 +107,22 @@ def parse_code_name(value: str) -> tuple[str, str]:
     value = clean_cell(value)
     m = re.match(r"([0-9A-Z]{3,})\s*\((.*?)\)", value)
     if m:
-        return m.group(1), normalize_security_name(m.group(2))
+        code = m.group(1)
+        if code.isdigit():
+            code = code.zfill(5)
+        return code, normalize_security_name(m.group(2))
     m = re.match(r"([0-9A-Z]{3,})\s*\((.*)$", value)
     if m:
-        return m.group(1), normalize_security_name(m.group(2))
+        code = m.group(1)
+        if code.isdigit():
+            code = code.zfill(5)
+        return code, normalize_security_name(m.group(2))
     parts = value.split(None, 1)
     if parts:
-        return parts[0], normalize_security_name(parts[1]) if len(parts) > 1 else ""
+        code = parts[0]
+        if code.isdigit():
+            code = code.zfill(5)
+        return code, normalize_security_name(parts[1]) if len(parts) > 1 else ""
     return "", ""
 
 
@@ -127,7 +136,12 @@ def complete_new_format_name(code: str, current_name: str, currency: str, lines:
     parts = [p.strip() for p in content.split(" / ") if p.strip()]
     if not parts:
         return normalize_security_name(current_name)
-    head = parts[0].split(f" {currency} ", 1)[0].strip()
+    head = parts[0]
+    # Strip exchange tokens (SEHK, NYSE, etc.) that appear between the name
+    # and the currency in 2025-11+ format.
+    for ex in ["SEHK", "FUTU OTC", "NYSE", "NASDAQ", "AMEX", "OCEA", "EDGX", "XNAS", "BATS", "IEX", "ARCA", "PHLX"]:
+        head = head.split(f" {ex} ", 1)[0].strip()
+    head = head.split(f" {currency} ", 1)[0].strip()
     tail = "".join(
         p
         for p in parts[1:]
@@ -233,20 +247,35 @@ def trade_header_from_new_line(line: str) -> tuple[str, str, str, Decimal, Decim
     # New statements often wrap the security name after the first few Chinese
     # characters, so the header line can be "03939(萬國黃 HKD ..." without a
     # closing parenthesis. Treat the currency token as the reliable delimiter.
+    # Also tolerate a trailing closing paren so that "2648(安井食品) HKD ..." is
+    # not rejected (the bare pattern would have `[^)]*?` swallow up to the
+    # closing paren and then require whitespace immediately after the group).
     code_match = re.match(
-        r"(?P<code_name>[0-9A-Z]{3,}\([^)]*?)\s+(?P<currency>[A-Z]{3})\s+(?P<tail>.*)$",
+        r"(?P<code_name>[0-9A-Z]{3,}\([^)]*?\)?)\s+(?P<currency>[A-Z]{3})\s+(?P<tail>.*)$",
         rest,
     )
-    if not code_match:
-        return None
-    code_name = code_match.group("code_name")
-    tail = f"{code_match.group('currency')} {code_match.group('tail')}"
-    nums = MONEY_RE.findall(tail)
-    if len(nums) < 4:
-        return None
-    currency = code_match.group("currency")
-    qty, price, amount, change = nums[-4:]
-    return side, code_name, currency, d(qty), d(price), d(amount), d(change)
+    if code_match:
+        code_name = code_match.group("code_name")
+        tail = f"{code_match.group('currency')} {code_match.group('tail')}"
+        nums = MONEY_RE.findall(tail)
+        if len(nums) >= 4:
+            currency = code_match.group("currency")
+            qty, price, amount, change = nums[-4:]
+            return side, code_name, currency, d(qty), d(price), d(amount), d(change)
+    # 2025-11+ format: code_name moved to the next line; header is just
+    # "side  currency  qty  price  amount  change".
+    fallback_match = re.match(
+        r"(?P<currency>[A-Z]{3})\s+(?P<tail>.*)$",
+        rest,
+    )
+    if fallback_match:
+        tail = f"{fallback_match.group('currency')} {fallback_match.group('tail')}"
+        nums = MONEY_RE.findall(tail)
+        if len(nums) >= 4:
+            currency = fallback_match.group("currency")
+            qty, price, amount, change = nums[-4:]
+            return side, "", currency, d(qty), d(price), d(amount), d(change)
+    return None
 
 
 def parse_new_text(pdf: pdfplumber.PDF, rel: str) -> list[Trade]:
@@ -273,6 +302,20 @@ def parse_new_text(pdf: pdfplumber.PDF, rel: str) -> list[Trade]:
         if not header:
             continue
         side_text, code_name, currency, total_qty, total_price, total_amount, total_change = header
+        # 2025-11+ format: code_name is empty on the header line; extract it
+        # from the following line which starts with "CODE(name...".
+        if not code_name:
+            for line in lines[1:]:
+                # 2025-11+ format: next line is "CODE(name) EXCHANGE CCY DATE ..."
+                # EXCHANGE can be multi-word (e.g. "FUTU OTC").  Match code
+                # followed by any exchange tokens then currency + date.
+                m = re.match(
+                    r"([0-9A-Z]{2,}\([^)]*?\)?)\s+[A-Z]{2,}(?:\s+[A-Z]{2,})*\s+[A-Z]{3}\s+\d{4}/\d{2}/\d{2}",
+                    line,
+                )
+                if m:
+                    code_name = m.group(1)
+                    break
         code, name = parse_code_name(code_name)
         name = complete_new_format_name(code, name, currency, lines)
         execs = [m.groupdict() for line in lines[1:] for m in EXEC_RE.finditer(line)]
@@ -438,9 +481,11 @@ def classify_cash_action(description: str, direction: str) -> str:
         return ""
     if "HANDLING CHARGE" in desc or "SCRIP CHARGE" in desc or re.search(r"\bCA FEE\b|\bHANDLING FEE\b", desc):
         return "公司行动费用"
+    if "WITHOLDING TAX" in desc or "WITHHOLDING TAX" in desc:
+        return "股息/分派相关费用"
     if re.search(r"\b(?:\d{2}(?:/\d{2})?\s*)?(?:F/D|I/D)\b", desc):
         return "股息/分派"
-    if re.search(r"\b(?:FINAL|INTERIM|INT|SPECIAL)\s+(?:DIS|DIST|DISTRIBUTION)\b|\bDISTRIBUTION\b|\bDIVIDEND\b", desc):
+    if re.search(r"\b(?:FINAL|INTERIM|INT|SPECIAL)\s+(?:DIS|DIST|DISTRIBUTION)\b|\bDISTRIBUTION\b|\bDIVIDEND", desc):
         return "股息/分派"
     if "SUBSCRIPTION RIGHTS" in desc or "RIGHTS" in desc or "ENTITLEMENT" in desc:
         return "其他公司行动"
@@ -717,6 +762,119 @@ def extract_ipo_allotment_trades(pdf: pdfplumber.PDF, rel: str) -> list[Trade]:
                 notes=f"IPO allotment cost basis; application={money(application)} refund={money(refund)} handling={money(handling)}",
             )
         )
+    return trades
+
+
+SCRIP_DIVIDEND_HEAD_RE = re.compile(
+    r"(?P<date>\d{4}/\d{2}/\d{2})\s+"
+    r"(?P<direction>增加|減少)\s+"
+    r"公司行動\s+"
+    r"(?P<security>\S+?)\s+"
+    r"(?P<currency>[A-Z]{3})\s+"
+    r"(?P<amount1>[-+]?\d[\d,]*(?:\.\d+)?)\s+"
+    r"(?P<amount2>[-+]?\d[\d,]*(?:\.\d+)?)?"
+)
+SCRIP_DIVIDEND_DESC_RE = re.compile(
+    r"(?P<div_marker>(?:F/D|I/D)-[A-Z]{3}(?P<dps>[\d.]+)/SH).*?"
+    r"PAY IN CASH W/SCP OPT.*?"
+    r"REINV\s*PR\s*:\s*(?P<reinv>[A-Z]{3}?[\d.]+).*?"
+    r"SEHK\s+(?P<code>\d{3,5})[^<]*?>\s+(?P<qty>[\d,]+)\s*shares",
+    re.IGNORECASE,
+)
+SCRIP_DIVIDEND_ALT_RE = re.compile(
+    r"(?P<div_marker>(?:F/D|I/D)-[A-Z]{3}(?P<dps>[\d.]+)/SH).*?"
+    r"(?:SCRIP|SCP).*?"
+    r"SEHK\s+(?P<code>\d{3,5})[^<]*?>\s+(?P<qty>[\d,]+)\s*shares",
+    re.IGNORECASE,
+)
+
+
+def extract_scrip_dividend_trades(pdf: pdfplumber.PDF, rel: str) -> list[Trade]:
+    """Detect HK scrip-dividend (以股代息) corporate actions and synthesise a
+    buy trade so that downstream FIFO/weighted-average engines can match the
+    new shares against later sells. Tangchen Group 00258 issued two such
+    scrip dividends in 2025 (132,000 and 216,000 shares). The cost basis
+    per share is the cash dividend that was forgone (dps from "I/D-HKD0.13/SH"),
+    not the REINV PR, which is the company's reference price.
+    """
+    trades: list[Trade] = []
+    seen: set[tuple[str, str, str]] = set()
+    for page_no, page in enumerate(pdf.pages, start=1):
+        text = norm_text(page.extract_text(x_tolerance=1, y_tolerance=3) or "")
+        if not text:
+            continue
+        if "公司行動" not in text:
+            continue
+        # The corporate-action line is often followed by a continuation line
+        # (e.g. the security name may be wrapped or the "REINV PR:" portion is
+        # on a separate line).  Collapse the page text into single-line chunks
+        # by replacing internal newlines with spaces for easier regex matching.
+        flat_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        # Join adjacent lines so the regex sees a single string per record.
+        joined = " ".join(flat_lines)
+        for match in SCRIP_DIVIDEND_HEAD_RE.finditer(joined):
+            date = match.group("date")
+            direction = match.group("direction")
+            currency = match.group("currency")
+            amount1 = d(match.group("amount1"))
+            amount2 = d(match.group("amount2") or "0")
+            if direction != "增加":
+                continue  # only the increase leg represents shares received
+            # The dividend value is the larger of the two cash amounts.
+            div_value = max(amount1, amount2) if amount2 else amount1
+            if div_value <= 0:
+                continue
+            # Look for the scrip-dividend marker following this record.
+            start = match.end()
+            tail = joined[start:start + 400]
+            desc_match = SCRIP_DIVIDEND_DESC_RE.search(tail) or SCRIP_DIVIDEND_ALT_RE.search(tail)
+            if not desc_match:
+                continue
+            qty = int(desc_match.group("qty").replace(",", ""))
+            dps = Decimal(desc_match.group("dps"))
+            # Cost basis per share is the cash dividend per share, not the
+            # reinvestment reference price. The qty is taken from the record
+            # description because the cash flow amount is the dividend value.
+            if qty <= 0 or dps <= 0:
+                continue
+            cost_per_share = dps
+            total_cost = money(dps * qty)
+            code = desc_match.group("code")
+            if code:
+                code = code.zfill(5) if code.isdigit() else code
+            security_text = match.group("security")
+            sec_code, sec_name = parse_code_name(security_text)
+            if not code:
+                code = sec_code
+            if not code:
+                continue
+            key = (date, code, str(qty))
+            if key in seen:
+                continue
+            seen.add(key)
+            trades.append(
+                Trade(
+                    source_file=rel,
+                    page=page_no,
+                    format="scrip_dividend",
+                    side="buy",
+                    order_id=f"{rel}#scrip#{code}#{date}",
+                    code=code,
+                    name=sec_name or "以股代息",
+                    market="SEHK",
+                    currency=currency or "HKD",
+                    trade_datetime=f"{date} 00:00:00",
+                    settle_date=date,
+                    quantity=qty_str(Decimal(qty)),
+                    price=str(cost_per_share.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)),
+                    amount=total_cost,
+                    change_amount="0.00",
+                    fee_total="0.00",
+                    fee_detail={},
+                    raw=match.group(0)[:200],
+                    notes=f"以股代息 dividend per share = {dps} {currency}; reinvest value = {money(div_value)} {currency}",
+                )
+            )
     return trades
 
 
