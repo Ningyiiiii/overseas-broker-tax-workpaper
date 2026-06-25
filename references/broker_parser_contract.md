@@ -113,7 +113,19 @@ Financing-related entries (margin interest, IPO financing interest, penalty inte
 - **Rule**: Entries like `罚息入账`, `IPO融资利息`, margin interest charges, and similar financing-cost entries go into `financing_interests`, NOT `incomes`. Only dividends, dividend tax withholding, and deposit interest go into `incomes`.
 - **Reason**: Misclassifying financing interest as income inflates dividend totals and understates financing costs.
 
-### 6. Import Common Utilities
+### 6. Settled vs Unsettled Trade Sections
+
+Broker statements may contain both a "settled / account statement" section and an "unsettled / pending trades" section. The unsettled section is a preview of trades that will settle in the next period; those same trades will appear again as settled in the next period's statement.
+
+- **Rule**: Parsers MUST track section context and ONLY emit trades from the settled / account-statement section. Lines in the unsettled-trades section MUST be skipped entirely. Do not rely on field-level dedup to catch these, because the unsettled and settled versions of the same trade can differ in date format, settlement date, and amount presentation.
+- **Reason**: If unsettled trades are also parsed, each such trade is counted twice (once as unsettled, once as settled in the next statement). This inflates sell quantities, depletes cost basis prematurely, and produces false "missing cost" exceptions for later sells.
+- **Example (USMART old format)**:
+  - `賬戶結單` (account statement) = settled, authoritative -> parse trades
+  - `未結算交易` (unsettled trades) = pending preview -> skip all lines
+  - `投資總結` / `資金變動` = summary, not trades -> skip
+- **Use**: Add a section-state variable. On entering the unsettled section, set a flag and skip every line until the next settled section or a non-trade summary section begins.
+
+### 7. Import Common Utilities
 
 Parsers SHOULD import shared utilities from `parsers.common` rather than reimplementing them:
 

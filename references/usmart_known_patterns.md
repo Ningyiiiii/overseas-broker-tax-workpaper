@@ -72,6 +72,22 @@ Dividend entries in the fund section sometimes lack the stock code on the same l
 
 **Fix**: Search nearby lines (±2-3 lines) for code patterns. Also backfill from other income records on the same date. Skip code backfill for generic interest records (they don't have stock codes).
 
+### 10. Settled vs Unsettled Trade Sections (Old Format)
+
+The old format (M002C-E) has distinct sections that the parser MUST track:
+
+- `賬戶結單` (account statement): settled trades — authoritative, parse these
+- `未結算交易` (unsettled trades): pending trades that will settle next month — SKIP entirely
+- `投資總結` / `資金變動`: summaries — not trades
+
+**Trap**: A line in `未結算交易` matches the trade regex (it has date, code, side, quantity, price, amount). Without section tracking, the parser reads it as a real trade. The same trade then appears again as settled in the next month's `賬戶結單`, causing double-counting.
+
+**Consequence**: The duplicated sell depletes cost basis prematurely, producing false "missing cost" exceptions for later sells and incorrect P&L.
+
+**Real example**: February 2021 statement `未結算交易` section contains `SELL 01501 1000 shares` (settlement 2021-03-01). The April 2021 statement `賬戶結單` section contains the same trade as settled. Without section tracking, the sell is counted twice, making 1000 extra shares of 01501 appear sold.
+
+**Fix**: Track section state with a variable. Only parse trades when inside the account-statement section. Skip all lines while inside the unsettled-trades section. See `broker_parser_contract.md` rule 6.
+
 ## Password
 
 USMART PDF password is user-provided. Do not commit real passwords.
