@@ -336,7 +336,7 @@ def _build_trade_detail_sheet(ws, trade_rows: list[TradeRow]) -> None:
             "", abs(r.quantity), r.price, _num(r.gross_amount), _num(r.fee_total),
             _num(change), order_id, order_id,
             Path(r.source_file).name if r.source_file else "", r.source_page or "",
-            "huatai", "",
+            "", "",  # broker 列（不再硬编码，留空）
         ]
         for col, value in enumerate(cells, start=1):
             ws.cell(row=i, column=col, value=value)

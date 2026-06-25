@@ -674,3 +674,76 @@ def parse_all_pdfs(root: Path, password: str):
         except Exception as e:
             errors.append({"file": pdf_path.name, "error": str(e)})
     return statements, errors
+
+
+
+
+class UsmartParser:
+    """盈立证券 (USMART) parser，符合 BrokerParser Protocol。"""
+    broker = "usmart"
+    _detect_keywords = ["USMART", "盈立", "盈立证券", "盈立证券(香港)", "USMART SECURITIES",
+                        "盈立证券香港有限公司"]
+
+    def can_parse_with_text(self, text: str) -> bool:
+        """用已有文本判断是否为盈立对账单（支持加密 PDF 先解密再判断）。"""
+        norm = normalize_text(text)
+        return any(kw in norm for kw in self._detect_keywords)
+
+    def can_parse(self, path) -> bool:
+        """内容级探测：读取 PDF 首页文本，匹配盈立特征词。"""
+        import pdfplumber
+        if path.suffix.lower() != ".pdf":
+            return False
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                if not pdf.pages:
+                    return False
+                first_page_text = pdf.pages[0].extract_text() or ""
+                if len(pdf.pages) > 1:
+                    first_page_text += "\n" + (pdf.pages[1].extract_text() or "")
+        except Exception:
+            return False
+        norm = normalize_text(first_page_text)
+        # 盈立特征词
+        keywords = ["USMART", "盈立", "盈立证券", "盈立证券(香港)", "USMART SECURITIES",
+                    "盈立证券香港有限公司"]
+        return any(kw in norm for kw in keywords)
+
+    def parse(self, path, password_candidates: list[str]) -> dict:
+        """解析单个 PDF，返回标准 dict 结构（与 HuataiParser.parse 对齐）。"""
+        password = ""
+        for p in password_candidates:
+            try:
+                with pdfplumber.open(str(path), password=p):
+                    password = p
+                    break
+            except Exception:
+                continue
+        stmt = parse_usmart_pdf(path, password)
+        return {
+            "broker": "usmart",
+            "source_file": path.name,
+            "statement_kind": stmt.statement_type or "",
+            "statement_period": stmt.statement_date or "",
+            "account": "",
+            "trades": stmt.trades,
+            "income": stmt.incomes,
+            "financing_interest": stmt.financing_interests,
+            "holdings": [],
+            "exceptions": stmt.exceptions,
+        }
+
+    def parse_all(self, root, password_candidates: list[str]) -> tuple[list[dict], list[dict]]:
+        """解析目录下所有 PDF，返回 (results, errors)。"""
+        results = []
+        errors = []
+        for pdf_path in sorted(root.rglob("*.pdf")):
+            try:
+                result = self.parse(pdf_path, password_candidates)
+                if not result["trades"] and not result["income"] and not result["financing_interest"] and not result["statement_kind"]:
+                    errors.append({"file": pdf_path.name, "error": "无法解析（可能为加密文件或空内容）"})
+                else:
+                    results.append(result)
+            except Exception as e:
+                errors.append({"file": pdf_path.name, "error": str(e)})
+        return results, errors

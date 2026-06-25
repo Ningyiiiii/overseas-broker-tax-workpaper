@@ -564,9 +564,30 @@ def _name_from_trade_raw(raw: str) -> str:
 
 class HuataiParser:
     broker = "huatai"
+    _detect_keywords = ["华泰", "華泰", "华泰金融", "华泰证券", "客户户口",
+                        "成交单据", "户口变动", "持货结存"]
+
+    def can_parse_with_text(self, text: str) -> bool:
+        """用已有文本判断是否为华泰对账单（支持加密 PDF 先解密再判断）。"""
+        return any(kw in text for kw in self._detect_keywords)
 
     def can_parse(self, path: Path) -> bool:
-        return path.suffix.lower() == ".pdf"
+        """内容级探测：读取 PDF 首页文本，匹配华泰特征词。"""
+        if path.suffix.lower() != ".pdf":
+            return False
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                if not pdf.pages:
+                    return False
+                first_page_text = pdf.pages[0].extract_text() or ""
+                if len(pdf.pages) > 1:
+                    first_page_text += "\n" + (pdf.pages[1].extract_text() or "")
+        except Exception:
+            return False
+        # 华泰特征词
+        keywords = ["华泰", "華泰", "华泰金融", "华泰证券", "客户户口",
+                    "成交单据", "户口变动", "持货结存"]
+        return any(kw in first_page_text for kw in keywords)
 
     def parse(self, path: Path, password_candidates: list[str]) -> dict:
         trades: list[TradeRecord] = []
