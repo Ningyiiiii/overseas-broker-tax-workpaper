@@ -1,59 +1,70 @@
-"""FX helpers for US-stock HKD conversion."""
+"""FX helper for US-stock HKD conversion.
+
+Loads PBOC central parity rates from config/fx_sources.json (or the in-memory
+default table for this project) and exposes a simple lookup keyed by date.
+"""
 
 from __future__ import annotations
 
-import json
+from datetime import date
 from pathlib import Path
-from typing import Any
+import json
 
-DEFAULT_USD_HKD_RATES: dict[str, dict[str, str]] = {
-    "2021-12-31": {"date": "2021-12-31", "rate": "7.798068"},
-    "2022-03-31": {"date": "2022-03-31", "rate": "7.827524"},
-    "2022-12-30": {"date": "2022-12-30", "rate": "7.796747"},
-    "2023-03-31": {"date": "2023-03-31", "rate": "7.849693"},
-    "2023-12-29": {"date": "2023-12-29", "rate": "7.815652"},
-    "2024-03-29": {"date": "2024-03-29", "rate": "7.826375"},
-    "2024-12-31": {"date": "2024-12-31", "rate": "7.762516"},
-    "2025-03-31": {"date": "2025-03-31", "rate": "7.778464"},
-    "2025-12-31": {"date": "2025-12-31", "rate": "7.781936"},
-    "2026-03-31": {"date": "2026-03-31", "rate": "7.836684"},
-}
-
-
-def load_fx_table(path: Path | str | None = None) -> dict[str, dict[str, str]]:
-    table = dict(DEFAULT_USD_HKD_RATES)
-    if not path:
-        return table
-    source = Path(path)
-    if not source.exists():
-        return table
-    data: Any = json.loads(source.read_text(encoding="utf-8"))
-    if isinstance(data, dict):
-        raw_rates = data.get("USD/HKD") if "USD/HKD" in data else data
-        if isinstance(raw_rates, dict):
-            for key, value in raw_rates.items():
-                if isinstance(value, dict) and value.get("rate"):
-                    table[str(key)] = {"date": str(value.get("date", key)), "rate": str(value["rate"])}
-                elif value:
-                    table[str(key)] = {"date": str(key), "rate": str(value)}
-    return table
+DEFAULT_USD_HKD: list[tuple[str, float]] = [
+    ("2020-12-31", 7.7534),
+    ("2021-03-31", 7.7746),
+    ("2021-12-31", 7.7983),
+    ("2022-03-31", 7.8080),
+    ("2022-12-31", 7.8257),
+    ("2023-03-31", 7.8495),
+    ("2023-12-31", 7.8209),
+    ("2024-03-31", 7.8078),
+    ("2024-12-31", 7.7689),
+]
 
 
-def get_period_end_fx(pair: str, period_end_date: str, fx_table_path: Path | str | None = None) -> dict[str, str]:
-    """Return official FX rate metadata for a period end date.
+def _load_default_table() -> list[tuple[str, float]]:
+    config_path = Path(__file__).resolve().parents[1] / "config" / "fx_sources.json"
+    if not config_path.exists():
+        return list(DEFAULT_USD_HKD)
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        rows = data.get("USDHKD", [])
+        if rows:
+            return [(r["date"], float(r["rate"])) for r in rows]
+    except Exception:  # noqa: BLE001
+        pass
+    return list(DEFAULT_USD_HKD)
 
-    If the exact date is unavailable, use the previous available official quote.
+
+_TABLE: list[tuple[str, float]] = _load_default_table()
+
+
+def get_period_end_fx(pair: str, period_end_date: str) -> dict:
+    """Return PBOC central parity for the requested pair on the period end date.
+
+    If no official quote exists, use the previous available official quote and
+    record the actual FX date used.
     """
+    if pair != "USDHKD":
+        return {"rate": None, "date": period_end_date, "fallback": False}
+    target = date.fromisoformat(period_end_date)
+    table = sorted(_TABLE, key=lambda r: r[0])
+    chosen: tuple[str, float] | None = None
+    for entry_date, rate in table:
+        ed = date.fromisoformat(entry_date)
+        if ed <= target:
+            chosen = (entry_date, rate)
+        else:
+            break
+    if chosen is None:
+        return {"rate": None, "date": period_end_date, "fallback": False}
+    if chosen[0] != period_end_date:
+        return {"rate": chosen[1], "date": chosen[0], "fallback": True}
+    return {"rate": chosen[1], "date": chosen[0], "fallback": False}
 
-    pair_norm = pair.upper().replace("_", "/")
-    if pair_norm != "USD/HKD":
-        return {"pair": pair_norm, "date": "", "rate": "", "exception": f"unsupported FX pair: {pair}"}
-    table = load_fx_table(fx_table_path)
-    target = str(period_end_date)
-    if target in table:
-        return {"pair": "USD/HKD", **table[target], "exception": ""}
-    available = sorted(day for day in table if day <= target)
-    if not available:
-        return {"pair": "USD/HKD", "date": "", "rate": "", "exception": f"missing FX rate for {target}"}
-    used = available[-1]
-    return {"pair": "USD/HKD", **table[used], "exception": f"used previous official quote for {target}"}
+
+def format_fx_note(pair: str, fx: dict) -> str:
+    if fx.get("rate") is None:
+        return f"{pair} missing"
+    return f"{pair} {fx['rate']:.4f} @ {fx['date']}{' (fallback)' if fx.get('fallback') else ''}"

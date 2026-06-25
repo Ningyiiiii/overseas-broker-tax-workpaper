@@ -1,12 +1,8 @@
-"""Validation placeholders for normalized records."""
+"""Validation helpers for normalized records."""
 
 from __future__ import annotations
 
-
-def looks_garbled(text: str) -> bool:
-    if not text:
-        return False
-    return "\ufffd" in text or "�" in text
+from .security_master import looks_garbled
 
 
 def validate_records(records: list[object]) -> list[dict]:
@@ -15,4 +11,8 @@ def validate_records(records: list[object]) -> list[dict]:
         name = getattr(record, "name", "")
         if looks_garbled(str(name)):
             issues.append({"index": index, "type": "garbled_name", "name": name})
+        # Date sanity
+        date_attr = getattr(record, "trade_date", None) or getattr(record, "date", None)
+        if not date_attr or len(str(date_attr)) < 8:
+            issues.append({"index": index, "type": "invalid_or_missing_date", "date": date_attr})
     return issues

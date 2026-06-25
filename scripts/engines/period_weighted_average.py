@@ -1,151 +1,279 @@
-"""Period weighted-average cost engine."""
+"""Period weighted-average cost engine.
+
+Period weighted-average cost is, by (market, currency, code, period):
+
+  weighted_average_unit_cost =
+    (opening_position_total_cost + period_buy_gross_amount + period_buy_fees)
+    / (opening_quantity + period_buy_quantity)
+
+  sell_deductible_cost =
+    weighted_average_unit_cost * sell_quantity + sell_fee_total
+
+  pnl =
+    sell_gross_amount - weighted_average_unit_cost * sell_quantity - sell_fee_total
+
+Opening cost comes from prior records or prior period carry-forward. If
+opening or period buy cost is missing, affected sells must remain blank and
+enter exceptions.
+"""
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import asdict, is_dataclass
+from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Any
 
-from .periods import china_calendar_year_key, hong_kong_fiscal_year_key
-
-
-def _record_dict(record: Any) -> dict[str, Any]:
-    if isinstance(record, dict):
-        return dict(record)
-    if is_dataclass(record):
-        return asdict(record)
-    return dict(vars(record))
+from tax_workpaper.engines.fifo import TradeRow
+from tax_workpaper.engines.periods import period_keys_for, parse_date
+from tax_workpaper.normalize.schema import TradeRecord
 
 
-def _decimal(value: Any) -> Decimal:
-    if value in (None, ""):
-        return Decimal("0")
-    return Decimal(str(value).replace(",", ""))
+@dataclass
+class _OpenPosition:
+    market: str
+    currency: str
+    code: str
+    period_key: str
+    quantity: float
+    cost: float  # opening total cost = unit_cost * quantity
 
 
-def _money(value: Decimal | str | int | float) -> Decimal:
-    return _decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+@dataclass
+class PwaResult:
+    rows: list[TradeRow] = field(default_factory=list)
+    exceptions: list[dict] = field(default_factory=list)
+    opening_positions: dict[tuple[str, str, str, str], _OpenPosition] = field(default_factory=dict)
 
 
-def _parse_date(value: str) -> date:
-    return date.fromisoformat(str(value).replace("/", "-")[:10])
+def _period_key_for(period_regime: str, record_date: str) -> str:
+    d = parse_date(record_date)
+    if d is None:
+        return ""
+    keys = period_keys_for(d)
+    return keys[period_regime]
 
 
-def _period_key(trade_date: str, period_regime: str) -> str:
-    dt = _parse_date(trade_date)
-    if period_regime in {"calendar", "china_calendar", "china_natural_year"}:
-        return china_calendar_year_key(dt)
-    if period_regime in {"hk_fiscal", "hong_kong_fiscal"}:
-        return hong_kong_fiscal_year_key(dt)
-    raise ValueError(f"unknown period regime: {period_regime}")
+def calculate_period_weighted_average(
+    records: list[TradeRecord],
+    market: str,
+    period_regime: str,
+    opening_positions: dict[tuple[str, str, str, str], _OpenPosition] | None = None,
+) -> PwaResult:
+    """Calculate period weighted-average P&L for one market and one period regime.
 
-
-def _period_start_year(period: str) -> int:
-    if period.startswith("CY"):
-        return int(period[2:])
-    if period.startswith("FY"):
-        return int(period[2:6])
-    return 0
-
-
-def _side(value: Any) -> str:
-    text = str(value or "").strip().upper()
-    if text in {"BUY", "B", "买入", "買入"}:
-        return "BUY"
-    if text in {"SELL", "S", "卖出", "賣出"}:
-        return "SELL"
-    return text
-
-
-def calculate_period_weighted_average(records: list[Any], period_regime: str, market: str = "") -> dict[str, Any]:
-    """Calculate realized gains with period weighted-average cost.
-
-    This is not moving average: all buys in a period participate in that
-    period's unit cost even if the buy date is later than a sell date.
+    `opening_positions` is the carry-forward from prior periods, keyed by
+    (market, currency, code, period_key). If not provided, we start with
+    zero opening positions, which is the right behavior for the first period
+    in our scope (2021).
     """
+    result = PwaResult()
+    result.opening_positions = dict(opening_positions or {})
 
-    trades = [_record_dict(record) for record in records]
-    if market:
-        trades = [trade for trade in trades if str(trade.get("market", "")).upper() == market.upper()]
-    trades.sort(key=lambda item: (str(item.get("trade_date") or item.get("date") or ""), str(item.get("source_file") or "")))
+    # Pre-populate state with the opening positions supplied by the caller.
+    state: dict[tuple[str, str, str], dict] = {}
+    for (mkt, ccy, code, period_key), op in (opening_positions or {}).items():
+        key = (mkt, ccy, code)
+        st = state.setdefault(key, {
+            "open_qty": 0.0,
+            "open_cost": 0.0,
+            "period_buy_qty": 0.0,
+            "period_buy_cost": 0.0,
+            "period_key": period_key,
+        })
+        # Only apply opening if it is for the most recent prior period; for
+        # the current calculation we only consume openings whose period is
+        # earlier than the first record's period. The runner passes openings
+        # for the immediately prior period only.
+        st["open_qty"] = op.quantity
+        st["open_cost"] = op.cost
+        st["period_key"] = period_key
 
-    by_period_symbol: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    periods: set[str] = set()
-    symbols: set[tuple[str, str, str]] = set()
-    for trade in trades:
-        period = _period_key(str(trade.get("trade_date") or trade.get("date")), period_regime)
-        symbol = (str(trade.get("market") or ""), str(trade.get("currency") or ""), str(trade.get("code") or ""))
-        by_period_symbol[(period, *symbol)].append(trade)
-        periods.add(period)
-        symbols.add(symbol)
+    sorted_records = sorted(
+        [r for r in records if r.market == market],
+        key=lambda r: (
+            (r.trade_date or ""),
+            r.source_file or "",
+            r.source_page or 0,
+            r.source_row or 0,
+        ),
+    )
 
-    rows_by_period: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    exceptions: list[dict[str, Any]] = []
-    carry: dict[tuple[str, str, str], dict[str, Decimal]] = defaultdict(lambda: {"quantity": Decimal("0"), "cost": Decimal("0")})
+    def _state_for(key: tuple[str, str, str]) -> dict:
+        if key not in state:
+            state[key] = {
+                "open_qty": 0.0,
+                "open_cost": 0.0,
+                "period_buy_qty": 0.0,
+                "period_buy_cost": 0.0,
+                "period_key": "",
+                "first_buy_date": "",
+            }
+        return state[key]
 
-    for period in sorted(periods, key=_period_start_year):
-        for symbol in sorted(symbols):
-            period_trades = by_period_symbol.get((period, *symbol), [])
-            if not period_trades:
-                continue
-            opening_quantity = carry[symbol]["quantity"]
-            opening_cost = carry[symbol]["cost"]
-            buy_quantity = Decimal("0")
-            buy_cost = Decimal("0")
-            for trade in period_trades:
-                if _side(trade.get("side")) == "BUY":
-                    buy_quantity += _decimal(trade.get("quantity"))
-                    buy_cost += _decimal(trade.get("gross_amount", trade.get("amount"))) + _decimal(trade.get("fee_total"))
-
-            denominator = opening_quantity + buy_quantity
-            total_cost = opening_cost + buy_cost
-            unit_cost = total_cost / denominator if denominator else None
-            period_sell_quantity = Decimal("0")
-
-            for trade in period_trades:
-                side = _side(trade.get("side"))
-                if side == "BUY":
-                    continue
-                if side != "SELL":
-                    continue
-                sell_quantity = _decimal(trade.get("quantity"))
-                sell_gross_amount = _decimal(trade.get("gross_amount", trade.get("amount")))
-                sell_fee = _decimal(trade.get("fee_total"))
-                period_sell_quantity += sell_quantity
-                if unit_cost is None or period_sell_quantity > denominator:
-                    row = {
-                        **trade,
-                        "period": period,
-                        "segment_quantity": sell_quantity,
-                        "sell_gross_amount": _money(sell_gross_amount),
-                        "weighted_average_unit_cost": None,
-                        "buy_gross_amount": None,
-                        "transaction_fee": _money(sell_fee),
-                        "pnl": None,
-                        "exception": "缺买入成本",
-                    }
-                    rows_by_period[period].append(row)
-                    exceptions.append(row)
-                    continue
-                deductible_cost = unit_cost * sell_quantity
-                pnl = sell_gross_amount - deductible_cost - sell_fee
-                rows_by_period[period].append(
+    for record in sorted_records:
+        key = (record.market, record.currency, record.code)
+        st = _state_for(key)
+        period_key = _period_key_for(period_regime, record.trade_date)
+        # Detect period boundary: if this trade is in a different period than
+        # the last trade for this key, roll the period buy state into the
+        # opening state and reset.
+        last_period = st.get("period_key")
+        if last_period and last_period != period_key:
+            # Move the period-aggregated buy into opening for the new period.
+            st["open_qty"] += st["period_buy_qty"]
+            st["open_cost"] += st["period_buy_cost"]
+            st["period_buy_qty"] = 0.0
+            st["period_buy_cost"] = 0.0
+            st["first_buy_date"] = ""
+        st["period_key"] = period_key
+        if record.side == "BUY":
+            st["period_buy_qty"] += record.quantity
+            st["period_buy_cost"] += abs(record.gross_amount) + abs(record.fee_total)
+            if not st.get("first_buy_date"):
+                st["first_buy_date"] = record.trade_date
+            d = parse_date(record.trade_date)
+            keys = period_keys_for(d) if d else {"china_calendar_year": "", "hong_kong_fiscal_year": ""}
+            result.rows.append(
+                TradeRow(
+                    code=record.code,
+                    market=record.market,
+                    currency=record.currency,
+                    side="BUY",
+                    trade_date=record.trade_date,
+                    quantity=record.quantity,
+                    price=record.price,
+                    gross_amount=abs(record.gross_amount),
+                    fee_total=abs(record.fee_total),
+                    source_file=record.source_file,
+                    source_page=record.source_page or 0,
+                    raw_text=record.raw_text,
+                    name=record.name,
+                    period_keys=(
+                        keys["china_calendar_year"],
+                        keys["hong_kong_fiscal_year"],
+                    ),
+                )
+            )
+        elif record.side == "SELL":
+            open_qty = st["open_qty"]
+            open_cost = st["open_cost"]
+            period_buy_qty = st["period_buy_qty"]
+            period_buy_cost = st["period_buy_cost"]
+            total_qty = open_qty + period_buy_qty
+            missing = False
+            if total_qty <= 0:
+                missing = True
+            elif open_qty < 0 or period_buy_qty < 0:
+                missing = True
+            sell_qty = abs(record.quantity)
+            sell_gross = abs(record.gross_amount)
+            sell_fee = abs(record.fee_total)
+            if missing:
+                pnl = None
+                unit_cost = None
+                buy_allocated = None
+                sell_allocated_amount = sell_gross
+                sell_allocated_fee = sell_fee
+                buy_allocated_fee = None
+                tx_fee = None
+                result.exceptions.append(
                     {
-                        **trade,
-                        "period": period,
-                        "segment_quantity": sell_quantity,
-                        "sell_gross_amount": _money(sell_gross_amount),
-                        "weighted_average_unit_cost": unit_cost.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP),
-                        "buy_gross_amount": _money(deductible_cost),
-                        "transaction_fee": _money(sell_fee),
-                        "pnl": _money(pnl),
-                        "exception": "",
+                        "type": "missing_opening_or_period_buy",
+                        "code": record.code,
+                        "market": record.market,
+                        "currency": record.currency,
+                        "trade_date": record.trade_date,
+                        "period": period_key,
+                        "quantity": sell_qty,
+                        "source_file": record.source_file,
+                        "source_page": record.source_page,
                     }
                 )
+            else:
+                unit_cost = (open_cost + period_buy_cost) / total_qty
+                buy_allocated = unit_cost * sell_qty
+                buy_allocated_fee = 0.0
+                sell_allocated_amount = sell_gross
+                sell_allocated_fee = sell_fee
+                tx_fee = sell_fee
+                pnl = sell_gross - buy_allocated - sell_fee
+            d = parse_date(record.trade_date)
+            if d is not None:
+                keys = period_keys_for(d)
+                cy_key = keys["china_calendar_year"]
+                fy_key = keys["hong_kong_fiscal_year"]
+            else:
+                cy_key = fy_key = ""
+            first_buy_date = st.get("first_buy_date", "")
+            if missing:
+                pwa_note = "缺买入成本"
+            else:
+                pwa_note = (
+                    f"期间加权平均成本法；{period_key}；"
+                    f"期初股数{int(open_qty)}；本期买入股数{int(period_buy_qty)}；"
+                    f"持仓起始买入日期{first_buy_date}"
+                )
+            source_note = f"sell:{record.source_file} period_weighted_average_pool"
+            result.rows.append(
+                TradeRow(
+                    code=record.code,
+                    market=record.market,
+                    currency=record.currency,
+                    side="SELL",
+                    trade_date=record.trade_date,
+                    quantity=-sell_qty,
+                    price=record.price,
+                    gross_amount=sell_gross,
+                    fee_total=sell_fee,
+                    source_file=record.source_file,
+                    source_page=record.source_page or 0,
+                    raw_text=record.raw_text,
+                    name=record.name,
+                    period_keys=(cy_key, fy_key),
+                    sell_allocated_amount=sell_allocated_amount,
+                    sell_allocated_fee=sell_allocated_fee,
+                    buy_allocated_amount=buy_allocated,
+                    buy_allocated_fee=buy_allocated_fee,
+                    transaction_fee=tx_fee,
+                    pnl=pnl,
+                    missing_cost=missing,
+                    pwa_note=pwa_note,
+                    source_note=source_note,
+                )
+            )
+        else:
+            result.rows.append(
+                TradeRow(
+                    code=record.code,
+                    market=record.market,
+                    currency=record.currency,
+                    side=record.side,
+                    trade_date=record.trade_date,
+                    quantity=record.quantity,
+                    price=record.price,
+                    gross_amount=abs(record.gross_amount),
+                    fee_total=abs(record.fee_total),
+                    source_file=record.source_file,
+                    source_page=record.source_page or 0,
+                    raw_text=record.raw_text,
+                    name=record.name,
+                )
+            )
 
-            carry[symbol]["quantity"] = denominator - period_sell_quantity
-            carry[symbol]["cost"] = unit_cost * carry[symbol]["quantity"] if unit_cost is not None and carry[symbol]["quantity"] > 0 else Decimal("0")
-
-    return {"rows_by_period": dict(rows_by_period), "exceptions": exceptions}
+    # Carry forward: convert current open state to opening positions for the
+    # next period (caller can use this for the next period).
+    for key, st in state.items():
+        # Find the most recent period key for this key.
+        market, ccy, code = key
+        period_key = st.get("period_key") or ""
+        open_qty = st["open_qty"] + st["period_buy_qty"]
+        open_cost = st["open_cost"] + st["period_buy_cost"]
+        if open_qty > 0:
+            result.opening_positions[(market, ccy, code, period_key)] = _OpenPosition(
+                market=market,
+                currency=ccy,
+                code=code,
+                period_key=period_key,
+                quantity=open_qty,
+                cost=open_cost,
+            )
+    return result
