@@ -13,6 +13,12 @@ from pathlib import Path
 
 import pdfplumber
 
+# 从 common 导入共享工具（CJK 归一化、数字/日期解析、繁简转换）
+try:
+    from .common import normalize_text, parse_number, parse_date, to_simplified
+except ImportError:
+    from common import normalize_text, parse_number, parse_date, to_simplified
+
 
 # ---- Text normalization ----
 # PDF uses CJK compatibility ideographs (Kangxi radicals U+2F00-U+2FD5 and others).

@@ -13,97 +13,17 @@ Dividends appear in cash movement section with transaction codes:
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pdfplumber
 
-
-# ---- CJK compatibility normalization ----
-
-def _build_cjk_compat_map() -> dict[str, str]:
-    m: dict[str, str] = {}
-    for cp in range(0x2F00, 0x2FD6):
-        ch = chr(cp)
-        decomp = unicodedata.decomposition(ch)
-        if decomp:
-            parts = decomp.split()
-            if parts and parts[0].startswith("<"):
-                if len(parts) > 1:
-                    m[ch] = chr(int(parts[1], 16))
-            else:
-                m[ch] = chr(int(parts[0], 16))
-    for cp in range(0xF900, 0xFB00):
-        ch = chr(cp)
-        decomp = unicodedata.decomposition(ch)
-        if decomp:
-            parts = decomp.split()
-            if parts[0].startswith("<") and len(parts) > 1:
-                m[ch] = chr(int(parts[1], 16))
-            elif parts:
-                m[ch] = chr(int(parts[0], 16))
-    return m
-
-
-_CJK_COMPAT_MAP = _build_cjk_compat_map()
-
-
-def normalize_text(text: str) -> str:
-    if not text:
-        return text
-    return "".join(_CJK_COMPAT_MAP.get(ch, ch) for ch in text)
-
-
-def parse_number(s: str) -> float:
-    s = s.strip().replace(",", "")
-    if not s:
-        return 0.0
-    negative = False
-    if s.startswith("(") and s.endswith(")"):
-        negative = True
-        s = s[1:-1]
-    if s.startswith("-"):
-        negative = True
-        s = s[1:]
-    try:
-        val = float(s)
-    except ValueError:
-        return 0.0
-    return -val if negative else val
-
-
-# ---- Traditional to Simplified Chinese mapping ----
-
-_T2S = {
-    "國": "国", "萊": "莱", "醫": "医", "械": "械", "買": "买", "賣": "卖",
-    "結": "结", "單": "单", "証": "证", "券": "券", "寶": "宝", "實": "实",
-    "電": "电", "訊": "讯", "氣": "气", "車": "车", "銀": "银", "行": "行",
-    "中國": "中国", "石油": "石油", "控股": "控股", "集團": "集团",
-    "綜": "综", "結": "结", "餘": "余", "額": "额", "變": "变", "動": "动",
-    "現": "现", "股": "股", "數": "数", "價": "价", "格": "格", "總": "总",
-    "費": "费", "稅": "税", "據": "据", "擇": "择",
-    "證": "证", "經": "经", "紀": "纪", "傭": "佣", "佣": "佣",
-    "印": "印", "花": "花", "徵": "征", "財": "财", "匯": "汇",
-    "局": "局", "系": "系", "統": "统", "場": "场",
-    "聯": "联", "合": "合", "交": "交", "易": "易", "所": "所",
-    "港": "港", "元": "元", "幣": "币", "貨": "货",
-    "日": "日", "期": "期", "結": "结", "算": "算",
-    "參": "参", "考": "考", "編": "编", "號": "号",
-    "存": "存", "取": "取", "承": "承", "前": "前", "轉": "转", "後": "后",
-    "投": "投", "資": "资", "組": "组", "市": "市", "值": "值",
-    "可": "可", "抵": "抵", "押": "押", "額": "额",
-    "利": "利", "率": "率", "息": "息",
-    "融": "融", "資": "资", "保": "保", "證": "证", "金": "金",
-    "重": "重", "要": "要", "提": "提", "示": "示",
-    "瑛": "瑛", "泰": "泰",
-}
-
-
-def to_simplified(s: str) -> str:
-    for t, sp in _T2S.items():
-        s = s.replace(t, sp)
-    return s
+# 从 common 导入共享工具（CJK 归一化、数字解析、繁简转换）
+try:
+    from .common import normalize_text, parse_number, to_simplified
+except ImportError:
+    # fallback: 当作为独立模块使用时（不在 tax_workpaper.parsers 包内）
+    from common import normalize_text, parse_number, to_simplified
 
 
 # ---- Data classes ----
