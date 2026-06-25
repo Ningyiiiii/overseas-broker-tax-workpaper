@@ -123,3 +123,27 @@ Company-action stock movements can also create cost-basis records. If a stock mo
 ## Names and Mojibake
 
 Futu PDF text extraction can corrupt Chinese security names. Never output mojibake as a final security name. Build a security master from all available sources, backfill by `market + code`, and if still unresolved leave the name blank and record a missing-name exception.
+
+## Universal Lessons (from cross-broker testing)
+
+The following lessons were identified while testing with USMART statements but apply to Futu and all other brokers:
+
+### CJK Normalization
+
+PDF text extraction can yield Kangxi radicals (U+2F00-U+2FD5) instead of standard CJK characters. Futu PDFs may also exhibit this. Always normalize before format detection and section matching. Use \parsers.common.normalize_text()\.
+
+### Precise Section Detection
+
+Do not use substring matching (\in\ operator) for section headers. Business lines can contain section keywords as substrings. Use \parsers.common.SectionRule\ with exact or short-line match.
+
+### Cross-Statement Deduplication
+
+Monthly statements may carry forward entries from prior months. Always deduplicate income and financing-interest records after parsing all statements. Use \parsers.common.deduplicate_records()\.
+
+### Name Consistency
+
+Different statements for the same stock may use different character sets (Traditional vs Simplified). Build a security master from all trades and normalize names. Use \parsers.common.backfill_names()\.
+
+### Financing Interest Classification
+
+Margin interest, penalty interest, and similar financing-cost entries must be classified as \inancing_interests\, not \incomes\. Review the fund-section business types carefully for each broker.

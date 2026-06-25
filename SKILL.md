@@ -45,8 +45,9 @@ Read these files when implementing or modifying the workflow:
 - `references/algorithm_spec.md`: FIFO, period weighted-average, dividends, financing interest, and FX rules.
 - `references/output_workbook_spec.md`: workbook layout and formatting.
 - `references/error_handling.md`: blocking errors, warnings, and exception tables.
-- `references/broker_parser_contract.md`: how to add or update broker parsers.
+- `references/broker_parser_contract.md`: how to add or update broker parsers (includes universal rules for CJK normalization, section detection, dedup, and name backfill).
 - `references/futu_known_patterns.md`: Futu-specific parsing notes.
+- `references/usmart_known_patterns.md`: USMART (盈立证券) parsing notes.
 - `references/fx_rate_rules.md`: official FX conversion rules for US stocks.
 - `references/validation_checklist.md`: final validation checklist.
 
@@ -62,6 +63,16 @@ Read these files when implementing or modifying the workflow:
 - Output numeric workbook fields as real Excel numbers.
 - Dividend and financing-interest detail rows must not repeat annual totals. Add one total row after all detail rows for each year or fiscal year.
 - US-stock workbooks must preserve original currency details and include HKD conversion using the official PBOC central parity rate for the period end date.
+
+## Universal Parser Rules
+
+All broker parsers MUST follow the universal rules in `references/broker_parser_contract.md`:
+
+1. **CJK Normalization**: Normalize PDF text before any detection or matching. Use `parsers.common.normalize_text()`.
+2. **Precise Section Detection**: Use exact/short-line match for section headers, never substring match. Use `parsers.common.SectionRule`.
+3. **Cross-Statement Dedup**: Deduplicate income and financing-interest records after parsing. Use `parsers.common.deduplicate_records()`.
+4. **Name Backfill**: Build security master and normalize names to Simplified Chinese. Use `parsers.common.backfill_names()`.
+5. **Financing Interest Classification**: Margin/penalty/IPO financing interest goes to `financing_interests`, not `incomes`.
 
 ## Resource Usage
 
@@ -82,3 +93,5 @@ python scripts/run_workpaper.py --source-root <source-folder> --output-dir <outp
 Use scripts in `scripts/parsers/`, `scripts/engines/`, `scripts/output/`, and `scripts/reports/` as implementation modules. The bundled `scripts/runtime/` contains the currently validated Futu end-to-end runtime used by the command wrapper; keep parser-specific rules there or in `scripts/parsers/` and keep shared algorithms in `scripts/engines/`.
 
 When adapting this skill to a new statement set, first produce and inspect normalized records before generating final workbooks. If a new broker is encountered, add a parser that satisfies `references/broker_parser_contract.md`; do not change the output workbook contract unless the user explicitly approves a new format.
+
+The shared parser utilities are in \scripts/parsers/common.py\. New broker parsers should import from \common\ rather than reimplementing CJK normalization, section detection, dedup, or name backfill.
