@@ -20,16 +20,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from collections import Counter
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 
-# 确保能 import skill 仓库的模块
-# skill 仓库的 scripts 目录就是 tax_workpaper 包
-_SKILL_ROOT = Path(r"c:\Users\Ning\.trae-cn\skills\overseas-broker-tax-workpaper")
-_SKILL_SCRIPTS = _SKILL_ROOT / "scripts"
+# 确保能 import 当前 skill 仓库的模块。不要绑定某台机器的安装路径。
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_SKILL_ROOT = _SCRIPT_DIR.parent
+_SKILL_SCRIPTS = _SCRIPT_DIR
 if str(_SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SKILL_SCRIPTS))
 
@@ -39,6 +39,8 @@ import types
 _tax_workpaper_pkg = types.ModuleType("tax_workpaper")
 _tax_workpaper_pkg.__path__ = [str(_SKILL_SCRIPTS)]
 sys.modules["tax_workpaper"] = _tax_workpaper_pkg
+
+from openpyxl import Workbook
 
 from tax_workpaper.engines.fifo import calculate_fifo
 from tax_workpaper.engines.periods import (
@@ -98,6 +100,7 @@ def _load_parsers() -> list:
         ("tax_workpaper.parsers.huatai_parser", "HuataiParser"),
         ("tax_workpaper.parsers.huasheng_parser", "HuashengParser"),
         ("tax_workpaper.parsers.usmart_parser", "UsmartParser"),
+        ("tax_workpaper.parsers.futu_parser", "FutuParser"),
     ]
     for mod_path, cls_name in parser_specs:
         try:
@@ -294,6 +297,168 @@ def _collect_period_keys(records, period_regime: str) -> list[str]:
     return sorted(keys)
 
 
+# ---- 配置、密码与审计输出 ----
+
+def _read_json(path: Path) -> dict:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return {}
+
+
+def _append_password(out: list[str], value) -> None:
+    if isinstance(value, str) and value and value not in out:
+        out.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            _append_password(out, item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _append_password(out, item)
+
+
+def _passwords_from_config(cfg: dict, base_dir: Path) -> list[str]:
+    passwords: list[str] = []
+    for key in ("passwords", "password_candidates"):
+        _append_password(passwords, cfg.get(key))
+    for key in ("per_broker", "per_account", "per_file"):
+        _append_password(passwords, cfg.get(key))
+    password_file = cfg.get("password_file")
+    if password_file:
+        nested = Path(password_file)
+        if not nested.is_absolute():
+            nested = base_dir / nested
+        for pwd in _passwords_from_config(_read_json(nested), nested.parent):
+            _append_password(passwords, pwd)
+    return passwords
+
+
+def _load_config_and_passwords(args, source_root: Path) -> tuple[dict, list[str]]:
+    config = {
+        "markets": ["HK", "US"],
+        "period_regimes": ["china_calendar_year", "hong_kong_fiscal_year"],
+        "cost_methods": ["fifo", "period_weighted_average"],
+    }
+    config_candidates: list[Path] = []
+    if args.config:
+        config_candidates.append(Path(args.config))
+    else:
+        config_candidates.extend([
+            source_root / "config.json",
+            source_root / "config" / "config.json",
+            _SKILL_ROOT / "config" / "config.json",
+        ])
+
+    password_candidates: list[str] = []
+    for pwd in args.password or []:
+        _append_password(password_candidates, pwd)
+
+    seen_configs: set[Path] = set()
+    for config_path in config_candidates:
+        config_path = config_path.resolve()
+        if config_path in seen_configs:
+            continue
+        seen_configs.add(config_path)
+        cfg = _read_json(config_path)
+        if not cfg:
+            continue
+        for key in config:
+            if key in cfg:
+                config[key] = cfg[key]
+        for pwd in _passwords_from_config(cfg, config_path.parent):
+            _append_password(password_candidates, pwd)
+
+    for password_path in (
+        source_root / "config" / "passwords.json",
+        _SKILL_ROOT / "config" / "passwords.json",
+    ):
+        for pwd in _passwords_from_config(_read_json(password_path), password_path.parent):
+            _append_password(password_candidates, pwd)
+    return config, password_candidates
+
+
+def _record_dict(record) -> dict:
+    if is_dataclass(record):
+        return {field.name: getattr(record, field.name) for field in fields(record)}
+    if isinstance(record, dict):
+        return dict(record)
+    return {
+        name: getattr(record, name)
+        for name in dir(record)
+        if not name.startswith("_") and not callable(getattr(record, name))
+    }
+
+
+def _write_rows(ws, headers: list[str], rows: list[dict]) -> None:
+    for col, header in enumerate(headers, start=1):
+        ws.cell(row=1, column=col, value=header)
+    for row_idx, row in enumerate(rows, start=2):
+        for col, header in enumerate(headers, start=1):
+            ws.cell(row=row_idx, column=col, value=row.get(header, ""))
+
+
+def write_audit_only(
+    output_dir: Path,
+    sources: list[Path],
+    results: list[dict],
+    errors: list[dict],
+    all_trades,
+    all_income,
+    all_financing,
+    validations: list[dict],
+    name_excs: list[dict],
+    source_files_meta: list[dict],
+    broker_stats: dict[str, int],
+) -> dict:
+    audit_path = output_dir / "normalized_records_audit.xlsx"
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    ws = wb.create_sheet("扫描文件")
+    _write_rows(ws, ["file", "suffix"], [{"file": str(p), "suffix": p.suffix.lower()} for p in sources])
+
+    ws = wb.create_sheet("解析来源与校验")
+    _write_rows(ws, ["文件", "类型", "期间", "客户户口", "交易笔数", "股息/分派笔数", "异常"], source_files_meta)
+
+    ws = wb.create_sheet("交易")
+    trade_rows = [_record_dict(r) for r in all_trades]
+    trade_headers = list(trade_rows[0].keys()) if trade_rows else ["broker", "market", "currency", "code", "name", "side", "trade_date"]
+    _write_rows(ws, trade_headers, trade_rows)
+
+    ws = wb.create_sheet("股息利息_公司行动")
+    income_rows = [_record_dict(r) for r in all_income]
+    income_headers = list(income_rows[0].keys()) if income_rows else ["broker", "market", "currency", "date", "code", "name", "category", "amount"]
+    _write_rows(ws, income_headers, income_rows)
+
+    ws = wb.create_sheet("融资利息")
+    financing_rows = [_record_dict(r) for r in all_financing]
+    financing_headers = list(financing_rows[0].keys()) if financing_rows else ["broker", "market", "currency", "date", "amount"]
+    _write_rows(ws, financing_headers, financing_rows)
+
+    ws = wb.create_sheet("异常")
+    exception_rows = list(errors) + list(validations) + list(name_excs)
+    exception_headers = sorted({key for row in exception_rows for key in row.keys()}) if exception_rows else ["type", "file", "detail"]
+    _write_rows(ws, exception_headers, exception_rows)
+
+    wb.save(audit_path)
+    report = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "mode": "audit_only",
+        "scanned_files": len(sources),
+        "parsed_files": len(results),
+        "failed_files": len(errors),
+        "broker_stats": broker_stats,
+        "trade_count": len(all_trades),
+        "income_count": len(all_income),
+        "financing_count": len(all_financing),
+        "audit_workbook": str(audit_path),
+    }
+    write_run_report(output_dir, report)
+    return report
+
+
 # ---- 主流程 ----
 
 def main() -> int:
@@ -302,34 +467,7 @@ def main() -> int:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 密码候选
-    password_candidates: list[str] = []
-    if args.password:
-        password_candidates.append(args.password)
-    # 尝试从 config 加载更多密码
-    config_path = Path(args.config) if args.config else source_root / "config.json"
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            for p in cfg.get("passwords", []):
-                if p not in password_candidates:
-                    password_candidates.append(p)
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    config = {
-        "markets": ["HK", "US"],
-        "period_regimes": ["china_calendar_year", "hong_kong_fiscal_year"],
-        "cost_methods": ["fifo", "period_weighted_average"],
-    }
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            for k in config:
-                if k in cfg:
-                    config[k] = cfg[k]
-        except (json.JSONDecodeError, OSError):
-            pass
+    config, password_candidates = _load_config_and_passwords(args, source_root)
 
     print(f"=== 海外券商税务底稿生成（统一入口）===")
     print(f"源目录: {source_root}")
@@ -393,6 +531,26 @@ def main() -> int:
 
     # Step 6: 验证
     validations = validate_records(all_trades) + validate_records(all_income)
+
+    if args.audit_only:
+        print("审计模式: 输出 normalized records，不计算盈亏...")
+        audit_report = write_audit_only(
+            output_dir,
+            sources,
+            results,
+            errors,
+            all_trades,
+            all_income,
+            all_financing,
+            validations,
+            name_excs,
+            source_files_meta,
+            broker_stats,
+        )
+        print(f"  生成: {audit_report['audit_workbook']}")
+        print("  生成: 运行报告.md")
+        print("  生成: run_report.json")
+        return 0
 
     # Step 7: 生成工作簿
     print("步骤7: 生成税务底稿工作簿...")
@@ -496,8 +654,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--source-root", default=".", help="源文件夹")
     parser.add_argument("--output-dir", default="税务底稿输出", help="输出文件夹")
-    parser.add_argument("--password", default="", help="PDF 密码")
+    parser.add_argument("--password", action="append", default=[], help="PDF 密码；可重复传入多个候选")
     parser.add_argument("--config", default="", help="配置文件路径")
+    parser.add_argument("--audit-only", action="store_true", help="只输出 normalized records 审计表，不计算盈亏")
     return parser.parse_args()
 
 

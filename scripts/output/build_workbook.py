@@ -3,8 +3,8 @@
 Each workbook contains:
 - 年度合计 (9 cols)
 - One sheet per period (CY2021, FY2021-2022, etc.) — 18 cols, SELL rows only
-- 股息利息_公司行动 (10 cols, flat detail, no totals)
-- 融资利息 (10 cols, flat detail, no totals)
+- 股息利息_公司行动 (detail rows plus one period total row)
+- 融资利息 (detail rows plus one period total row)
 - 缺成本与异常 (16 cols, full row data)
 - 缺名称与异常 (4 cols)
 - 解析来源与校验 (5 cols)
@@ -204,40 +204,75 @@ def _build_annual_sheet(ws, summaries: list[dict]) -> None:
 
 # ── 股息利息_公司行动 sheet (10 cols, flat) ─────────────────────────────────────
 
-DIV_HEADERS = ["date", "category", "currency", "amount", "code", "name", "description", "source_file", "page", "market"]
-DIV_WIDTHS = [12, 11, 10, 11, 8, 8, 45, 45, 8, 8]
+DIV_HEADERS = ["date", "category", "currency", "amount", "code", "name", "description", "source_file", "page", "market", "股息/分派按年合计"]
+DIV_WIDTHS = [12, 11, 10, 11, 8, 8, 45, 45, 8, 8, 16]
 
 
-def _build_dividend_sheet(ws, income_rows: list[IncomeRecord]) -> None:
+def _period_key_for_date(date_text: str, period_regime: str) -> str:
+    d = parse_date(date_text)
+    if d is None:
+        return ""
+    return period_keys_for(d)[period_regime]
+
+
+def _build_dividend_sheet(ws, income_rows: list[IncomeRecord], period_regime: str) -> None:
     _write_header(ws, DIV_HEADERS)
     _set_widths(ws, DIV_WIDTHS)
-    for i, r in enumerate(income_rows, start=2):
+    row_idx = 2
+    grouped: dict[tuple[str, str], list[IncomeRecord]] = defaultdict(list)
+    for row in income_rows:
+        grouped[(_period_key_for_date(row.date, period_regime), row.currency or "")].append(row)
+    for (period_key, currency), rows in sorted(grouped.items(), key=lambda item: item[0]):
+        for r in sorted(rows, key=lambda item: item.date):
+            cells = [
+                r.date, r.category, r.currency, _num(r.amount), r.code, r.name,
+                (r.raw_text or "")[:200], Path(r.source_file).name if r.source_file else "",
+                r.source_page or "", r.market, None,
+            ]
+            for col, value in enumerate(cells, start=1):
+                ws.cell(row=row_idx, column=col, value=value)
+            row_idx += 1
+        total = sum((r.amount or 0.0) for r in rows)
         cells = [
-            r.date, r.category, r.currency, _num(r.amount), r.code, r.name,
-            (r.raw_text or "")[:200], Path(r.source_file).name if r.source_file else "",
-            r.source_page or "", r.market,
+            period_key, "年度股息/分派合计", currency, None, "", "",
+            "", "", "", "", _num(total),
         ]
         for col, value in enumerate(cells, start=1):
-            ws.cell(row=i, column=col, value=value)
+            ws.cell(row=row_idx, column=col, value=value)
+        row_idx += 1
 
 
 # ── 融资利息 sheet (10 cols, flat) ──────────────────────────────────────────────
 
-FIN_HEADERS = ["date", "category", "currency", "amount", "code", "name", "description", "source_file", "page", "market"]
-FIN_WIDTHS = [12, 10, 10, 10, 8, 8, 45, 45, 8, 8]
+FIN_HEADERS = ["date", "category", "currency", "amount", "code", "name", "description", "source_file", "page", "market", "融资利息按年合计"]
+FIN_WIDTHS = [12, 10, 10, 10, 8, 8, 45, 45, 8, 8, 16]
 
 
-def _build_financing_sheet(ws, financing_rows: list[FinancingInterestRecord]) -> None:
+def _build_financing_sheet(ws, financing_rows: list[FinancingInterestRecord], period_regime: str) -> None:
     _write_header(ws, FIN_HEADERS)
     _set_widths(ws, FIN_WIDTHS)
-    for i, r in enumerate(financing_rows, start=2):
+    row_idx = 2
+    grouped: dict[tuple[str, str], list[FinancingInterestRecord]] = defaultdict(list)
+    for row in financing_rows:
+        grouped[(_period_key_for_date(row.date, period_regime), row.currency or "")].append(row)
+    for (period_key, currency), rows in sorted(grouped.items(), key=lambda item: item[0]):
+        for r in sorted(rows, key=lambda item: item.date):
+            cells = [
+                r.date, "融资利息", r.currency, _num(r.amount), "", "",
+                (r.raw_text or "")[:200], Path(r.source_file).name if r.source_file else "",
+                r.source_page or "", r.market, None,
+            ]
+            for col, value in enumerate(cells, start=1):
+                ws.cell(row=row_idx, column=col, value=value)
+            row_idx += 1
+        total = sum((r.amount or 0.0) for r in rows)
         cells = [
-            r.date, "融资利息", r.currency, _num(r.amount), "", "",
-            (r.raw_text or "")[:200], Path(r.source_file).name if r.source_file else "",
-            r.source_page or "", r.market,
+            period_key, "年度融资利息合计", currency, None, "", "",
+            "", "", "", "", _num(total),
         ]
         for col, value in enumerate(cells, start=1):
-            ws.cell(row=i, column=col, value=value)
+            ws.cell(row=row_idx, column=col, value=value)
+        row_idx += 1
 
 
 # ── 缺成本与异常 sheet (16 cols, full row data) ─────────────────────────────────
@@ -416,11 +451,11 @@ def build_workbook(
 
     # 股息利息_公司行动
     ws = wb.create_sheet("股息利息_公司行动")
-    _build_dividend_sheet(ws, income_rows)
+    _build_dividend_sheet(ws, income_rows, period_regime)
 
     # 融资利息
     ws = wb.create_sheet("融资利息")
-    _build_financing_sheet(ws, financing_rows)
+    _build_financing_sheet(ws, financing_rows, period_regime)
 
     # 缺成本与异常
     ws = wb.create_sheet("缺成本与异常")

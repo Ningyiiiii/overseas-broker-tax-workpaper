@@ -1,4 +1,19 @@
-from scripts.parsers.futu_parser import classify_market, infer_side, is_real_trade_candidate
+from __future__ import annotations
+
+import sys
+import types
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+pkg = types.ModuleType("tax_workpaper")
+pkg.__path__ = [str(SCRIPTS)]
+sys.modules["tax_workpaper"] = pkg
+
+from tax_workpaper.parsers.futu_parser import classify_market, infer_side, is_real_trade_candidate
 
 
 def test_futu_market_classification_is_record_level():

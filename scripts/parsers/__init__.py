@@ -43,6 +43,12 @@ def _get_parsers() -> list[Any]:
     except ImportError:
         pass
 
+    try:
+        from .futu_parser import FutuParser
+        instances.append(FutuParser())
+    except ImportError:
+        pass
+
     _PARSER_INSTANCES = instances
     return instances
 

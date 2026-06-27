@@ -20,6 +20,12 @@ if str(RUNTIME_DIR) not in sys.path:
 
 import futu_workpaper_runtime as runtime
 
+from tax_workpaper.normalize.schema import (
+    FinancingInterestRecord,
+    IncomeRecord,
+    TradeRecord,
+)
+
 
 HK_EXCHANGES = {"SEHK"}
 US_EXCHANGES = {"EDGX", "BATS", "MEMX", "XNAS", "XNYS", "NYSE", "NASDAQ", "AMEX", "ARCA", "IEX"}
@@ -111,9 +117,34 @@ def infer_side(side_text: str, cash_change: float | int | str | None) -> tuple[s
 
 class FutuParser:
     broker = "futu"
+    _detect_keywords = [
+        "Futu",
+        "富途",
+        "FUTU",
+        "Futu Securities",
+        "Account No.",
+        "SEHK",
+        "Scrip Charge",
+        "Handling Charge",
+    ]
 
     def can_parse(self, path: Path) -> bool:
-        return path.suffix.lower() in {".pdf", ".xlsx", ".xls", ".csv"}
+        if path.suffix.lower() not in {".pdf", ".xlsx", ".xls", ".csv"}:
+            return False
+        name = path.name.upper()
+        if "FUTU" in name or "富途" in path.name or "1001231828219038" in name or "100110" in name:
+            return True
+        if path.suffix.lower() != ".pdf":
+            return False
+        try:
+            with pdfplumber.open(path) as pdf:
+                text = "\n".join((page.extract_text() or "") for page in pdf.pages[:2])
+            return self.can_parse_with_text(text)
+        except Exception:
+            return False
+
+    def can_parse_with_text(self, text: str) -> bool:
+        return any(keyword in (text or "") for keyword in self._detect_keywords)
 
     def parse(self, path: Path, password_candidates: list[str]) -> dict:
         """Parse a Futu source file into normalized records.
@@ -123,8 +154,14 @@ class FutuParser:
         normalized dictionaries for the shared engines.
         """
 
-        password = password_candidates[0] if password_candidates else ""
-        runtime.PASSWORD = password
+        runtime.configure_runtime(
+            source_root=path.parent,
+            output_dir=path.parent / "outputs",
+            password=password_candidates[0] if password_candidates else "",
+            passwords=password_candidates or [],
+        )
+        runtime.PASSWORD = password_candidates[0] if password_candidates else ""
+        runtime.PASSWORDS = list(password_candidates or [])
         rel = path.name
         trades: list[object] = []
         income: list[dict] = []
@@ -136,7 +173,7 @@ class FutuParser:
                 trades.extend(runtime.parse_modern_ipo_allotments(path, rel))
                 income, financing = runtime.parse_modern_cash(path, rel)
             else:
-                with pdfplumber.open(path, password=password or None) as pdf:
+                with runtime.open_pdf_with_passwords(path) as pdf:
                     if "1001100520203011" in path.name or "美股" in str(path) or "US" in str(path).upper():
                         trades, income, financing = runtime.parse_old_us(pdf, rel)
                     else:
@@ -158,34 +195,72 @@ class FutuParser:
         for trade in trades:
             item = asdict(trade) if hasattr(trade, "__dataclass_fields__") else dict(trade)
             trade_records.append(
-                {
-                    "broker": self.broker,
-                    "market": item.get("market", ""),
-                    "currency": item.get("currency", ""),
-                    "code": item.get("code", ""),
-                    "name": item.get("name", ""),
-                    "side": "BUY" if item.get("side") == "buy" else "SELL" if item.get("side") == "sell" else item.get("side", ""),
-                    "trade_date": str(item.get("trade_datetime", ""))[:10].replace("/", "-"),
-                    "quantity": float(runtime.d(item.get("quantity"))),
-                    "price": float(runtime.d(item.get("price"))),
-                    "gross_amount": float(runtime.d(item.get("amount"))),
-                    "fee_total": float(runtime.d(item.get("fee_total"))),
-                    "source_file": item.get("source_file", str(path)),
-                    "exchange": "",
-                    "settle_date": str(item.get("settle_date", "")).replace("/", "-") or None,
-                    "order_id": item.get("order_id"),
-                    "cash_change": float(runtime.d(item.get("change_amount"))),
-                    "fee_detail": item.get("fee_detail", {}),
-                    "source_page": item.get("page"),
-                    "raw_text": item.get("raw", ""),
-                    "parser_layout": item.get("format", ""),
-                    "exception": item.get("notes", ""),
-                }
+                TradeRecord(
+                    broker=self.broker,
+                    market=item.get("market", ""),
+                    currency=item.get("currency", ""),
+                    code=item.get("code", ""),
+                    name=item.get("name", ""),
+                    side="BUY" if item.get("side") == "buy" else "SELL" if item.get("side") == "sell" else item.get("side", ""),
+                    trade_date=str(item.get("trade_datetime", ""))[:10].replace("/", "-"),
+                    settle_date=str(item.get("settle_date", "")).replace("/", "-") or None,
+                    order_id=item.get("order_id"),
+                    trade_id=item.get("order_id"),
+                    quantity=float(runtime.d(item.get("quantity"))),
+                    price=float(runtime.d(item.get("price"))),
+                    gross_amount=float(runtime.d(item.get("amount"))),
+                    fee_total=float(runtime.d(item.get("fee_total"))),
+                    source_file=item.get("source_file", str(path)),
+                    source_page=item.get("page"),
+                    source_row=None,
+                    raw_text=item.get("raw", "") or item.get("notes", ""),
+                )
+            )
+
+        income_records = []
+        for row in income:
+            item = asdict(row) if hasattr(row, "__dataclass_fields__") else dict(row)
+            income_records.append(
+                IncomeRecord(
+                    broker=self.broker,
+                    market=item.get("market", ""),
+                    currency=item.get("currency", ""),
+                    date=str(item.get("date", "")).replace("/", "-"),
+                    code=item.get("code", ""),
+                    name=item.get("name", ""),
+                    category=item.get("category", "股息/分派"),
+                    amount=float(runtime.d(item.get("amount"))),
+                    tax_withheld=float(runtime.d(item.get("tax_withheld"))) if item.get("tax_withheld") not in (None, "") else None,
+                    fee=float(runtime.d(item.get("fee"))) if item.get("fee") not in (None, "") else None,
+                    source_file=item.get("source_file", str(path)),
+                    source_page=item.get("page"),
+                    source_row=None,
+                    raw_text=item.get("raw", ""),
+                )
+            )
+
+        financing_records = []
+        for row in financing:
+            item = asdict(row) if hasattr(row, "__dataclass_fields__") else dict(row)
+            financing_records.append(
+                FinancingInterestRecord(
+                    broker=self.broker,
+                    market=item.get("market", ""),
+                    currency=item.get("currency", ""),
+                    date=str(item.get("date", "")).replace("/", "-"),
+                    amount=float(runtime.d(item.get("amount"))),
+                    source_file=item.get("source_file", str(path)),
+                    source_page=item.get("page"),
+                    source_row=None,
+                    raw_text=item.get("raw", ""),
+                )
             )
 
         return {
             "trades": trade_records,
-            "income": income,
-            "financing_interest": financing,
+            "income": income_records,
+            "financing_interest": financing_records,
             "exceptions": exceptions,
+            "broker": self.broker,
+            "source_file": str(path),
         }

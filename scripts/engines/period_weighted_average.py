@@ -20,7 +20,6 @@ enter exceptions.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
 
 from tax_workpaper.engines.fifo import TradeRow
 from tax_workpaper.engines.periods import period_keys_for, parse_date
@@ -68,25 +67,6 @@ def calculate_period_weighted_average(
     result = PwaResult()
     result.opening_positions = dict(opening_positions or {})
 
-    # Pre-populate state with the opening positions supplied by the caller.
-    state: dict[tuple[str, str, str], dict] = {}
-    for (mkt, ccy, code, period_key), op in (opening_positions or {}).items():
-        key = (mkt, ccy, code)
-        st = state.setdefault(key, {
-            "open_qty": 0.0,
-            "open_cost": 0.0,
-            "period_buy_qty": 0.0,
-            "period_buy_cost": 0.0,
-            "period_key": period_key,
-        })
-        # Only apply opening if it is for the most recent prior period; for
-        # the current calculation we only consume openings whose period is
-        # earlier than the first record's period. The runner passes openings
-        # for the immediately prior period only.
-        st["open_qty"] = op.quantity
-        st["open_cost"] = op.cost
-        st["period_key"] = period_key
-
     sorted_records = sorted(
         [r for r in records if r.market == market],
         key=lambda r: (
@@ -97,39 +77,69 @@ def calculate_period_weighted_average(
         ),
     )
 
-    def _state_for(key: tuple[str, str, str]) -> dict:
-        if key not in state:
-            state[key] = {
-                "open_qty": 0.0,
-                "open_cost": 0.0,
-                "period_buy_qty": 0.0,
-                "period_buy_cost": 0.0,
-                "period_key": "",
-                "first_buy_date": "",
+    period_data: dict[tuple[str, str, str], dict[str, dict]] = {}
+    for record in sorted_records:
+        key = (record.market, record.currency, record.code)
+        period_key = _period_key_for(period_regime, record.trade_date)
+        data = period_data.setdefault(key, {}).setdefault(period_key, {
+            "first_date": record.trade_date,
+            "buy_qty": 0.0,
+            "buy_cost": 0.0,
+            "sell_qty": 0.0,
+            "first_buy_date": "",
+        })
+        if record.trade_date < data["first_date"]:
+            data["first_date"] = record.trade_date
+        if record.side == "BUY":
+            data["buy_qty"] += record.quantity
+            data["buy_cost"] += abs(record.gross_amount) + abs(record.fee_total)
+            if not data["first_buy_date"] or record.trade_date < data["first_buy_date"]:
+                data["first_buy_date"] = record.trade_date
+        elif record.side == "SELL":
+            data["sell_qty"] += abs(record.quantity)
+
+    opening_by_key: dict[tuple[str, str, str], tuple[float, float]] = {}
+    for (mkt, ccy, code, _period_key), op in (opening_positions or {}).items():
+        key = (mkt, ccy, code)
+        qty, cost = opening_by_key.get(key, (0.0, 0.0))
+        opening_by_key[key] = (qty + op.quantity, cost + op.cost)
+
+    pool_info: dict[tuple[str, str, str, str], dict] = {}
+    for key, periods in period_data.items():
+        open_qty, open_cost = opening_by_key.get(key, (0.0, 0.0))
+        for period_key, data in sorted(periods.items(), key=lambda item: item[1]["first_date"]):
+            total_qty = open_qty + data["buy_qty"]
+            total_cost = open_cost + data["buy_cost"]
+            unit_cost = total_cost / total_qty if total_qty > 0 else None
+            pool_info[(*key, period_key)] = {
+                "open_qty": open_qty,
+                "open_cost": open_cost,
+                "period_buy_qty": data["buy_qty"],
+                "period_buy_cost": data["buy_cost"],
+                "first_buy_date": data["first_buy_date"],
+                "unit_cost": unit_cost,
+                "remaining_qty": total_qty,
             }
-        return state[key]
+            if unit_cost is None:
+                open_qty = data["buy_qty"] - data["sell_qty"]
+                open_cost = data["buy_cost"]
+            else:
+                open_qty = max(total_qty - data["sell_qty"], 0.0)
+                open_cost = unit_cost * open_qty
 
     for record in sorted_records:
         key = (record.market, record.currency, record.code)
-        st = _state_for(key)
         period_key = _period_key_for(period_regime, record.trade_date)
-        # Detect period boundary: if this trade is in a different period than
-        # the last trade for this key, roll the period buy state into the
-        # opening state and reset.
-        last_period = st.get("period_key")
-        if last_period and last_period != period_key:
-            # Move the period-aggregated buy into opening for the new period.
-            st["open_qty"] += st["period_buy_qty"]
-            st["open_cost"] += st["period_buy_cost"]
-            st["period_buy_qty"] = 0.0
-            st["period_buy_cost"] = 0.0
-            st["first_buy_date"] = ""
-        st["period_key"] = period_key
+        pool = pool_info.get((*key, period_key), {
+            "open_qty": 0.0,
+            "open_cost": 0.0,
+            "period_buy_qty": 0.0,
+            "period_buy_cost": 0.0,
+            "first_buy_date": "",
+            "unit_cost": None,
+            "remaining_qty": 0.0,
+        })
         if record.side == "BUY":
-            st["period_buy_qty"] += record.quantity
-            st["period_buy_cost"] += abs(record.gross_amount) + abs(record.fee_total)
-            if not st.get("first_buy_date"):
-                st["first_buy_date"] = record.trade_date
             d = parse_date(record.trade_date)
             keys = period_keys_for(d) if d else {"china_calendar_year": "", "hong_kong_fiscal_year": ""}
             result.rows.append(
@@ -154,22 +164,18 @@ def calculate_period_weighted_average(
                 )
             )
         elif record.side == "SELL":
-            open_qty = st["open_qty"]
-            open_cost = st["open_cost"]
-            period_buy_qty = st["period_buy_qty"]
-            period_buy_cost = st["period_buy_cost"]
+            open_qty = pool["open_qty"]
+            open_cost = pool["open_cost"]
+            period_buy_qty = pool["period_buy_qty"]
+            period_buy_cost = pool["period_buy_cost"]
             total_qty = open_qty + period_buy_qty
-            missing = False
-            if total_qty <= 0:
-                missing = True
-            elif open_qty < 0 or period_buy_qty < 0:
-                missing = True
             sell_qty = abs(record.quantity)
             sell_gross = abs(record.gross_amount)
             sell_fee = abs(record.fee_total)
+            unit_cost = pool["unit_cost"]
+            missing = unit_cost is None or pool["remaining_qty"] < sell_qty
             if missing:
                 pnl = None
-                unit_cost = None
                 buy_allocated = None
                 sell_allocated_amount = sell_gross
                 sell_allocated_fee = sell_fee
@@ -189,13 +195,13 @@ def calculate_period_weighted_average(
                     }
                 )
             else:
-                unit_cost = (open_cost + period_buy_cost) / total_qty
                 buy_allocated = unit_cost * sell_qty
                 buy_allocated_fee = 0.0
                 sell_allocated_amount = sell_gross
                 sell_allocated_fee = sell_fee
                 tx_fee = sell_fee
                 pnl = sell_gross - buy_allocated - sell_fee
+                pool["remaining_qty"] -= sell_qty
             d = parse_date(record.trade_date)
             if d is not None:
                 keys = period_keys_for(d)
@@ -203,7 +209,7 @@ def calculate_period_weighted_average(
                 fy_key = keys["hong_kong_fiscal_year"]
             else:
                 cy_key = fy_key = ""
-            first_buy_date = st.get("first_buy_date", "")
+            first_buy_date = pool.get("first_buy_date", "")
             if missing:
                 pwa_note = "缺买入成本"
             else:
@@ -259,21 +265,26 @@ def calculate_period_weighted_average(
                 )
             )
 
-    # Carry forward: convert current open state to opening positions for the
-    # next period (caller can use this for the next period).
-    for key, st in state.items():
-        # Find the most recent period key for this key.
+    for key, periods in period_data.items():
         market, ccy, code = key
-        period_key = st.get("period_key") or ""
-        open_qty = st["open_qty"] + st["period_buy_qty"]
-        open_cost = st["open_cost"] + st["period_buy_cost"]
-        if open_qty > 0:
-            result.opening_positions[(market, ccy, code, period_key)] = _OpenPosition(
+        latest_period = ""
+        latest_first_date = ""
+        for period_key, data in periods.items():
+            if not latest_first_date or data["first_date"] > latest_first_date:
+                latest_first_date = data["first_date"]
+                latest_period = period_key
+        if not latest_period:
+            continue
+        pool = pool_info.get((*key, latest_period), {})
+        unit_cost = pool.get("unit_cost")
+        ending_qty = pool.get("remaining_qty", 0.0)
+        if unit_cost is not None and ending_qty > 0:
+            result.opening_positions[(market, ccy, code, latest_period)] = _OpenPosition(
                 market=market,
                 currency=ccy,
                 code=code,
-                period_key=period_key,
-                quantity=open_qty,
-                cost=open_cost,
+                period_key=latest_period,
+                quantity=ending_qty,
+                cost=unit_cost * ending_qty,
             )
     return result
